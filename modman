@@ -1,0 +1,3836 @@
+#!/bin/bash
+# ==========================================
+# modman - Менеджер модулей (CLI Backend)
+# ==========================================
+
+CONF_FILE="/etc/modman.conf"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+[ -f "$SCRIPT_DIR/modman.conf" ] && CONF_FILE="$SCRIPT_DIR/modman.conf"
+if [ -f "$CONF_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$CONF_FILE"
+else
+    echo "Ошибка: Конфигурационный файл $CONF_FILE не найден!"
+    exit 1
+fi
+
+: "${PFS_BIN:=pfs}"
+: "${PFSINFO_BIN:=pfsinfo}"
+: "${PFS_LAYER_STATE_DIR:=/run/pfs-utils/layer-map}"
+: "${MODMAN_PROC_MOUNTS:=/proc/mounts}"
+: "${MODMAN_PROC_CMDLINE:=/proc/cmdline}"
+: "${MODMAN_AUFS_SYS_ROOT:=/sys/fs/aufs}"
+: "${MODMAN_INITVARS_FILE:=/etc/initvars}"
+: "${MODMAN_IGNORE_DEPS:=}"
+: "${EXT:=pfs}"
+: "${CLI_STYLE:=pacman}"
+if ! declare -p REPO_URLS >/dev/null 2>&1; then
+    REPO_URLS=()
+fi
+
+# AUFS_INITRD_PREFIX / DOWNLOAD_DIR autodetect is lazy: list commands should
+# not pay for pfs helper startup unless they actually need these values.
+
+# Cache layout. CACHE_DIR is the preferred knob (directory). Legacy
+# CACHE_FILE still accepted: if set without CACHE_DIR, the parent dir
+# becomes CACHE_DIR and both file paths derive from it.
+if [ -n "${CACHE_DIR:-}" ]; then
+    :
+elif [ -n "${CACHE_FILE:-}" ]; then
+    CACHE_DIR="${CACHE_FILE%/*}"
+else
+    CACHE_DIR="/var/cache/modman"
+fi
+: "${CACHE_FILE:=${CACHE_DIR}/db.txt}"
+: "${CACHE_DEP:=${CACHE_DIR}/dependencies.txt}"
+: "${MODMAN_STATE_DIR:=/var/lib/modman}"
+if [ -z "${UPDATE_BLACKLIST_FILE:-}" ]; then
+    UPDATE_BLACKLIST_FILE="${MODMAN_STATE_DIR}/update-blacklist.tsv"
+    LEGACY_UPDATE_BLACKLIST_FILE="${CACHE_DIR}/update-blacklist.tsv"
+else
+    : "${LEGACY_UPDATE_BLACKLIST_FILE:=}"
+fi
+
+MACHINE_MODE=0
+UPDATE_VERBOSE_SKIPS=0
+INCLUDE_BLACKLISTED=0
+FORCE_DEPS=0
+CONFIRM_SYSTEM_UPDATES=0
+_PARSED_DOWNLOAD_DIR=""
+_PARSED_PROGRESS_FILE=""
+_PARSED_LOAD_CMD=""
+_PARSED_PFSLOAD_FLAGS=()
+filtered_args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --machine)
+            MACHINE_MODE=1
+            shift
+            ;;
+        --verbose-skips)
+            UPDATE_VERBOSE_SKIPS=1
+            shift
+            ;;
+        --include-blacklisted)
+            INCLUDE_BLACKLISTED=1
+            shift
+            ;;
+        --confirm-system-updates)
+            CONFIRM_SYSTEM_UPDATES=1
+            shift
+            ;;
+        -d|--download-dir)
+            _PARSED_DOWNLOAD_DIR="$2"
+            shift 2
+            ;;
+        --download-dir=*)
+            _PARSED_DOWNLOAD_DIR="${1#*=}"
+            shift
+            ;;
+        --force-deps)
+            FORCE_DEPS=1
+            shift
+            ;;
+        --progress-file)
+            _PARSED_PROGRESS_FILE="$2"
+            shift 2
+            ;;
+        --progress-file=*)
+            _PARSED_PROGRESS_FILE="${1#*=}"
+            shift
+            ;;
+        --lower)
+            _PARSED_PFSLOAD_FLAGS+=(-l)
+            shift
+            ;;
+        --upper)
+            _PARSED_PFSLOAD_FLAGS+=(-u)
+            shift
+            ;;
+        --toram)
+            _PARSED_PFSLOAD_FLAGS+=(-r)
+            shift
+            ;;
+        --load-cmd)
+            _PARSED_LOAD_CMD="$2"
+            shift 2
+            ;;
+        --load-cmd=*)
+            _PARSED_LOAD_CMD="${1#*=}"
+            shift
+            ;;
+        *)
+            filtered_args+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- "${filtered_args[@]}"
+
+# Validate: -l and -u are mutually exclusive layer flags.
+_has_l=0; _has_u=0
+for _f in "${_PARSED_PFSLOAD_FLAGS[@]}"; do
+    case "$_f" in -l) _has_l=1 ;; -u) _has_u=1 ;; esac
+done
+if [ "$_has_l" -eq 1 ] && [ "$_has_u" -eq 1 ]; then
+    printf '%s\n' "--lower и --upper несовместимы: укажите только один слой" >&2
+    exit 2
+fi
+unset _has_l _has_u _f
+
+# CLI -d/--download-dir overrides config and pre-empts autodetect.
+[ -n "$_PARSED_DOWNLOAD_DIR" ] && DOWNLOAD_DIR="$_PARSED_DOWNLOAD_DIR"
+
+# CLI --progress-file overrides any inherited MODMAN_PROGRESS_FILE env.
+# This is the canonical way to pass the path under pkexec, which strips
+# unwhitelisted env vars before exec'ing modman.
+if [ -n "$_PARSED_PROGRESS_FILE" ]; then
+    export MODMAN_PROGRESS_FILE="$_PARSED_PROGRESS_FILE"
+fi
+
+# Persistent flags propagated to recursive `$0 -S <dep>` calls so child
+# subprocesses inherit the same install context (machine mode, custom
+# download dir, force-deps, progress file sink).
+_RECURSE_FLAGS=()
+[ "$MACHINE_MODE" -eq 1 ] && _RECURSE_FLAGS+=(--machine)
+[ -n "$_PARSED_DOWNLOAD_DIR" ] && _RECURSE_FLAGS+=(-d "$_PARSED_DOWNLOAD_DIR")
+[ "$FORCE_DEPS" -eq 1 ] && _RECURSE_FLAGS+=(--force-deps)
+[ -n "$_PARSED_PROGRESS_FILE" ] && _RECURSE_FLAGS+=(--progress-file "$_PARSED_PROGRESS_FILE")
+for _f in "${_PARSED_PFSLOAD_FLAGS[@]}"; do
+    case "$_f" in
+        -l) _RECURSE_FLAGS+=(--lower) ;;
+        -u) _RECURSE_FLAGS+=(--upper) ;;
+        -r) _RECURSE_FLAGS+=(--toram) ;;
+    esac
+done
+unset _f
+[ -n "$_PARSED_LOAD_CMD" ] && _RECURSE_FLAGS+=(--load-cmd "$_PARSED_LOAD_CMD")
+unset _PARSED_DOWNLOAD_DIR
+unset _PARSED_PROGRESS_FILE
+
+print_msg() {
+    if [ "$MACHINE_MODE" -eq 0 ]; then
+        echo -e "$1"
+    fi
+}
+print_err() {
+    if [ "$MACHINE_MODE" -eq 0 ]; then
+        echo -e "\e[31m[Ошибка]\e[0m $1" >&2
+    fi
+}
+fatal_err() {
+    if [ "$MACHINE_MODE" -eq 0 ]; then
+        echo -e "\e[31m[Ошибка]\e[0m $1" >&2
+    else
+        printf '%s\n' "$1" >&2
+    fi
+}
+print_ok() {
+    if [ "$MACHINE_MODE" -eq 0 ]; then
+        echo -e "\e[32m[OK]\e[0m $1"
+    fi
+}
+
+_TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+    _TIMEOUT_BIN="timeout"
+fi
+
+_run_with_timeout() {
+    local secs="$1"
+    shift
+    if [ -n "$_TIMEOUT_BIN" ]; then
+        "$_TIMEOUT_BIN" "$secs" "$@"
+    else
+        "$@"
+    fi
+}
+
+_MODMAN_WARN_FILE=""
+if _MODMAN_WARN_FILE=$(mktemp 2>/dev/null); then
+    trap 'rm -f "$_MODMAN_WARN_FILE"' EXIT
+fi
+
+_emit_deferred_warn() {
+    local tag="$1"
+    local msg="$2"
+    if [ -n "$_MODMAN_WARN_FILE" ]; then
+        printf 'warn\t%s\t%s\n' "$tag" "$msg" >>"$_MODMAN_WARN_FILE"
+    fi
+}
+
+_flush_deferred_warns() {
+    if [ -n "$_MODMAN_WARN_FILE" ] && [ -s "$_MODMAN_WARN_FILE" ]; then
+        cat "$_MODMAN_WARN_FILE" >&2
+        : >"$_MODMAN_WARN_FILE"
+    fi
+}
+
+# ==========================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ==========================================
+
+# Очистка имени для поиска в pacman (удаляем версии и суффиксы PuppyRus)
+clean_pkgname() {
+    local name="$1"
+    name="${name%."${EXT}"}"
+    name=$(echo "$name" | sed -E 's/^[0-9]+-//')
+    name=$(echo "$name" | sed -E 's/-[0-9].*//')
+    name=$(echo "$name" | sed -E 's/(-p|-bin|-gtk[23]|_64|-sf[0-9]+|-any|-au[0-9]+)//g')
+    echo "$name"
+}
+
+# Короткое имя для файла зависимостей (оставляем суффиксы, удаляем только версию)
+short_pkgname() {
+    local name="$1"
+    name="${name%."${EXT}"}"
+    # Отрезаем всё начиная с первого тире, за которым идет цифра, а также специфичные суффиксы
+    echo "$name" | sed -E 's/(-[0-9].*|_any.*|_64.*|-sf[0-9]+.*|-au[0-9]+.*)//'
+}
+
+_find_cache_line_by_shortname() {
+    local query="${1,,}"
+    local line=""
+    local filename=""
+    local shortname=""
+
+    [ -f "$CACHE_FILE" ] || return 1
+    while IFS= read -r line; do
+        filename=${line%%$'\t'*}
+        [ -n "$filename" ] || continue
+        shortname=$(short_pkgname "$filename")
+        if [ "${shortname,,}" = "$query" ]; then
+            printf '%s\n' "$line"
+            return 0
+        fi
+    done < <(grep -F -- "$identity" "$CACHE_FILE" 2>/dev/null || true)
+    return 1
+}
+
+_find_cache_line_by_filename_match() {
+    local query="${1,,}"
+    local mode="$2"
+    local line=""
+    local filename=""
+    local filename_lc=""
+
+    [ -f "$CACHE_FILE" ] || return 1
+    while IFS= read -r line; do
+        filename=${line%%$'\t'*}
+        [ -n "$filename" ] || continue
+        filename_lc="${filename,,}"
+
+        case "$mode" in
+            prefix)
+                [[ "$filename_lc" == "$query"* ]] || continue
+                ;;
+            contains)
+                [[ "$filename_lc" == *"$query"* ]] || continue
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+
+        printf '%s\n' "$line"
+        return 0
+    done < <(grep -F -- "$identity" "$CACHE_FILE" 2>/dev/null || true)
+    return 1
+}
+
+_validate_name() {
+    local name="$1"
+
+    if [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]*$ ]]; then
+        return 0
+    fi
+
+    print_err "Недопустимое имя модуля: '$name'"
+    return 2
+}
+
+_require_aufs_initrd_prefix() {
+    if [ -z "${AUFS_INITRD_PREFIX:-}" ] && command -v "$PFS_BIN" >/dev/null 2>&1; then
+        AUFS_INITRD_PREFIX="$("$PFS_BIN" --aufs-initrd-prefix 2>/dev/null || true)"
+    fi
+    [ -n "${AUFS_INITRD_PREFIX:-}" ] && return 0
+    print_err "AUFS_INITRD_PREFIX не задан в /etc/modman.conf и autodetect не сработал."
+    print_err "Запустите '$PFS_BIN --aufs-initrd-prefix' для подробностей или"
+    print_err "укажите AUFS_INITRD_PREFIX явно в /etc/modman.conf."
+    exit 1
+}
+
+_require_download_dir() {
+    if [ -z "${DOWNLOAD_DIR:-}" ] && command -v "$PFS_BIN" >/dev/null 2>&1; then
+        DOWNLOAD_DIR="$("$PFS_BIN" --download-dir 2>/dev/null || true)"
+        if [ -n "${DOWNLOAD_DIR:-}" ] && { [ ! -d "$DOWNLOAD_DIR" ] || [[ "$DOWNLOAD_DIR" == *ERROR* ]]; }; then
+            DOWNLOAD_DIR=""
+        fi
+    fi
+    if [ -z "${DOWNLOAD_DIR:-}" ]; then
+        local rootaufs2_root=""
+        rootaufs2_root=$(_rootaufs2_home_root 2>/dev/null || true)
+        if [ -n "$rootaufs2_root" ] && [ -d "$rootaufs2_root/optional" ]; then
+            DOWNLOAD_DIR="$rootaufs2_root/optional"
+        fi
+    fi
+    [ -n "${DOWNLOAD_DIR:-}" ] && return 0
+    print_err "DOWNLOAD_DIR не задан в /etc/modman.conf и autodetect не сработал."
+    print_err "Запустите '$PFS_BIN --download-dir' для подробностей или"
+    print_err "укажите DOWNLOAD_DIR явно в /etc/modman.conf."
+    exit 1
+}
+
+_require_runtime_mount_prefix() {
+    if [ -n "${AUFS_SYSTEM_PATH:-}" ]; then
+        RUNTIME_MOUNT_PREFIX="$AUFS_SYSTEM_PATH"
+        return 0
+    fi
+    if [ -z "${RUNTIME_MOUNT_PREFIX:-}" ] && command -v "$PFS_BIN" >/dev/null 2>&1; then
+        RUNTIME_MOUNT_PREFIX="$(bash -c '. "$1" >/dev/null 2>&1; printf "%s" "${prefixmp:-}"' _ "$PFS_BIN" 2>/dev/null || true)"
+    fi
+    [ -n "${RUNTIME_MOUNT_PREFIX:-}" ] || RUNTIME_MOUNT_PREFIX="/mnt/."
+    return 0
+}
+
+_rootaufs2_home_root() {
+    local dir=""
+
+    # mkinitcpio-rootaufs2 accepts both kernel cmdline forms:
+    #   dir=<name>   (legacy / Porteus-style)
+    #   diro=<name>  (newer initrds: "directory readonly")
+    # Try diro= first because production stands use it; fall back to dir=.
+    dir=$(grep -oE '(^| )diro=[^ ]+' "$MODMAN_PROC_CMDLINE" 2>/dev/null | head -n1 | cut -d= -f2-)
+    if [ -z "$dir" ]; then
+        dir=$(grep -oE '(^| )dir=[^ ]+' "$MODMAN_PROC_CMDLINE" 2>/dev/null | head -n1 | cut -d= -f2-)
+    fi
+    [ -n "$dir" ] || return 1
+    printf '/mnt/home/%s\n' "$dir"
+}
+
+_cmdline_value() {
+    local key="$1"
+    grep -oE "(^| )${key}=[^ ]+" "$MODMAN_PROC_CMDLINE" 2>/dev/null | head -n1 | cut -d= -f2-
+}
+
+_discovery_rootaufs2_root() {
+    if [ -n "${MODMAN_TEST_ROOTAUFS2_ROOT:-}" ]; then
+        printf '%s\n' "${MODMAN_TEST_ROOTAUFS2_ROOT%/}"
+        return 0
+    fi
+    _rootaufs2_home_root
+}
+
+_discovery_home_root() {
+    local rootaufs2_root=""
+
+    if [ -n "${MODMAN_TEST_HOME_ROOT:-}" ]; then
+        printf '%s\n' "${MODMAN_TEST_HOME_ROOT%/}"
+        return 0
+    fi
+
+    rootaufs2_root=$(_discovery_rootaufs2_root 2>/dev/null || true)
+    [ -n "$rootaufs2_root" ] || return 1
+    printf '%s\n' "${rootaufs2_root%/*}"
+}
+
+_local_module_dirs() {
+    local rootaufs2_root=""
+    local dir=""
+
+    if [ -n "${DOWNLOAD_DIR:-}" ] && [ -d "$DOWNLOAD_DIR" ]; then
+        printf '%s\n' "$DOWNLOAD_DIR"
+    fi
+
+    rootaufs2_root=$(_discovery_rootaufs2_root 2>/dev/null || true)
+    if [ -n "$rootaufs2_root" ]; then
+        for dir in "$rootaufs2_root/base" "$rootaufs2_root/modules" "$rootaufs2_root/optional"; do
+            [ -d "$dir" ] && printf '%s\n' "$dir"
+        done
+    fi
+}
+
+_update_warn_optional() {
+    local msg="$1"
+    printf 'warn\toptional_source\t%s\n' "$msg" >&2
+}
+
+# Documented machine-row schemas for downstream consumers.
+# shellcheck disable=SC2034
+UPDATE_ROW_SCHEMA_UPDATE=$'update\tid\tname\told_version\tnew_version\tinstalled_path\tcandidate_filename\trepo\trisk\treboot_required\tmessage'
+# shellcheck disable=SC2034
+UPDATE_ROW_SCHEMA_APPLIED=$'applied\tid\told_path\tnew_path\tbackup_path\trisk\treboot_required\tmessage'
+# shellcheck disable=SC2034
+UPDATE_ROW_SCHEMA_SKIPPED=$'skipped\treason\tid\tmessage'
+# shellcheck disable=SC2034
+UPDATE_ROW_SCHEMA_ERROR=$'error\treason\tid\tmessage'
+# shellcheck disable=SC2034
+UPDATE_ROW_SCHEMA_BLACKLIST=$'blacklist\tidentity\tnew_version\tcandidate_filename\trepo'
+
+_update_tsv_escape() {
+    local input="${1-}"
+    input=${input//\\/\\\\}
+    input=${input//$'\t'/\\t}
+    input=${input//$'\n'/\\n}
+    printf '%s' "$input"
+}
+
+_update_emit_row() {
+    local row_type="$1"
+    shift
+
+    local escaped=()
+    local field=""
+    for field in "$@"; do
+        escaped+=("$(_update_tsv_escape "$field")")
+    done
+
+    case "$row_type" in
+        update)
+            [ "$#" -eq 10 ] || return 2
+            ;;
+        applied)
+            [ "$#" -eq 7 ] || return 2
+            ;;
+        skipped|error)
+            [ "$#" -eq 3 ] || return 2
+            ;;
+        blacklist)
+            [ "$#" -eq 4 ] || return 2
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+
+    printf '%s' "$row_type"
+    for field in "${escaped[@]}"; do
+        printf '\t%s' "$field"
+    done
+    printf '\n'
+}
+
+_update_candidate_id() {
+    local installed_path="$1"
+    local identity="$2"
+    local new_version="$3"
+    local candidate_filename="$4"
+    local repo="$5"
+    local id_input=""
+    local candidate_id=""
+
+    # installed_path is already resolved by the caller (check_updates passes $resolved).
+    # Avoid a realpath fork; fall back only when the path is not yet absolute.
+    local resolved_installed_path="$installed_path"
+
+    id_input="${resolved_installed_path}"$'\t'"${identity}"$'\t'"${new_version}"$'\t'"${candidate_filename}"$'\t'"${repo}"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        # sha256sum outputs "<hash>  -"; strip the trailing "  -" with bash expansion
+        # instead of spawning awk.
+        candidate_id=$(printf '%s' "$id_input" | sha256sum)
+        candidate_id="${candidate_id%%  *}"
+    elif command -v openssl >/dev/null 2>&1; then
+        candidate_id=$(printf '%s' "$id_input" | openssl dgst -sha256)
+        candidate_id="${candidate_id##* }"
+    else
+        return 1
+    fi
+
+    printf '%s' "${candidate_id,,}"
+}
+
+_update_emit_discovered_paths() {
+    local path="$1"
+    local source="$2"
+    local resolved=""
+
+    [ -n "$path" ] || return 0
+    resolved=$(realpath -- "$path" 2>/dev/null || true)
+    if [ -z "$resolved" ]; then
+        _update_warn_optional "skip unresolved path (${source}): $path"
+        return 0
+    fi
+    [ -f "$resolved" ] || {
+        _update_warn_optional "skip missing file (${source}): $resolved"
+        return 0
+    }
+    printf '%s\t%s\n' "$resolved" "$source"
+}
+
+_update_discover_from_dirs() {
+    local dir=""
+    local f=""
+    while IFS= read -r dir; do
+        [ -d "$dir" ] || continue
+        while IFS= read -r f; do
+            _update_emit_discovered_paths "$f" "dir"
+        done < <(find "$dir" -type f -name "*.${EXT}" -print 2>/dev/null)
+    done
+    return 0
+}
+
+_update_discover_extramod_dir() {
+    local emod=""
+    local extdir=""
+    local home_root=""
+    local rootaufs2_root=""
+    local compat_extdir=""
+
+    emod="${EXTRAMOD:-}"
+    [ -z "$emod" ] && emod=$(_cmdline_value extramod)
+    [ -n "$emod" ] || return 0
+
+    if [[ "$emod" == /* ]]; then
+        extdir="$emod"
+    else
+        home_root=$(_discovery_home_root 2>/dev/null || true)
+        if [ -n "$home_root" ]; then
+            extdir="$home_root/$emod"
+        else
+            extdir="/mnt/home/$emod"
+        fi
+
+        if [ ! -d "$extdir" ]; then
+            rootaufs2_root=$(_discovery_rootaufs2_root 2>/dev/null || true)
+            if [ -n "$rootaufs2_root" ]; then
+                compat_extdir="$rootaufs2_root/$emod"
+                [ -d "$compat_extdir" ] && extdir="$compat_extdir"
+            fi
+        fi
+    fi
+
+    [ -d "$extdir" ] || {
+        _update_warn_optional "extramod not available: $extdir"
+        return 0
+    }
+    _update_discover_from_dirs <<<"$extdir"
+    return 0
+}
+
+_update_discover_from_loaded() {
+    local mode="$1"
+    local out=""
+    local path=""
+
+    if ! out=$(list_loaded "$mode" 2>/dev/null); then
+        _flush_deferred_warns
+        _update_warn_optional "list_loaded $mode unavailable"
+        return 0
+    fi
+
+    while IFS=$'\t' read -r _name _layer path _desc _mode _in_ram; do
+        [ -n "$path" ] || continue
+        _update_emit_discovered_paths "$path" "loaded-$mode"
+    done <<< "$out"
+    return 0
+}
+
+_update_discover_from_losetup() {
+    local back_file=""
+
+    if ! command -v losetup >/dev/null 2>&1; then
+        _update_warn_optional "losetup not found"
+        return 0
+    fi
+
+    local losetup_out=""
+    if ! losetup_out=$(_run_with_timeout 5 losetup -O BACK-FILE 2>/dev/null); then
+        printf 'warn\tlosetup_timeout\tlosetup -O BACK-FILE timed out or failed\n' >&2
+        return 0
+    fi
+
+    while IFS= read -r back_file; do
+        back_file="${back_file%% (deleted)}"
+        [ -n "$back_file" ] || continue
+        [[ "$back_file" == *.${EXT} ]] || continue
+        # Skip stale bats test artifacts: paths rooted at /bats-run-* (no real
+        # system module ever lives at the filesystem root under /bats-run-*).
+        [[ "$back_file" == /bats-run-* ]] && continue
+        _update_emit_discovered_paths "$back_file" "losetup"
+    done < <(awk 'NR>1 {print $1}' <<<"$losetup_out")
+    return 0
+}
+
+_update_risk_for_path() {
+    local resolved="$1"
+    local rootaufs2_root="$2"
+    local loaded_before_set="$3"
+    local loaded_after_set="$4"
+    local losetup_set="$5"
+
+    if [ -n "$rootaufs2_root" ] && [[ "$resolved" == "$rootaufs2_root/base/"* ]]; then
+        printf 'system\t1\tнужна перезагрузка\n'
+        return 0
+    fi
+
+    if printf '%s\n' "$loaded_before_set" | grep -Fxq "$resolved"; then
+        printf 'system\t1\tнужна перезагрузка\n'
+        return 0
+    fi
+
+    if printf '%s\n' "$loaded_after_set" | grep -Fxq "$resolved"; then
+        printf 'loaded\t0\tпереподключите модуль\n'
+        return 0
+    fi
+
+    if printf '%s\n' "$losetup_set" | grep -Fxq "$resolved"; then
+        printf 'loaded\t0\tпереподключите модуль\n'
+        return 0
+    fi
+
+    printf 'normal\t0\t\n'
+}
+
+# _update_risk_fast: path-based risk classification for check_updates.
+# No pfsinfo calls — uses only path prefix and losetup membership.
+# Args: resolved rootaufs2_root losetup_map_name
+# Output var: _RISK_RESULT (tab-separated "risk\treboot\tmessage")
+_update_risk_fast() {
+    local _resolved="$1"
+    local _rootaufs2_root="$2"
+    local -n _rfl="$3"
+
+    if [ -n "$_rootaufs2_root" ] && [[ "$_resolved" == "$_rootaufs2_root/base/"* ]]; then
+        _RISK_RESULT=$'system\t1\tнужна перезагрузка'
+        return 0
+    fi
+
+    if [[ -n "${_rfl["$_resolved"]:-}" ]]; then
+        _RISK_RESULT=$'loaded\t0\tпереподключите модуль'
+        return 0
+    fi
+
+    _RISK_RESULT=$'normal\t0\t'
+}
+
+_update_split_identity_version() {
+    local filename="$1"
+    local base=""
+    local masked=""
+    local -a tokens=()
+    local -a identity_tokens=()
+    local -a version_tokens=()
+    local token=""
+    local idx=0
+    local split_at=-1
+    local identity=""
+    local version=""
+
+    base="${filename##*/}"
+    base="${base%."${EXT}"}"
+    [ -n "$base" ] || return 1
+
+    # Replace arch/platform tokens with "masq" using pure bash regex — no sed fork.
+    # Patterns: i[3-6]86, x86_64, x86-64, x64, xf86, xf_86, Xf86, Qt4, _64 suffix.
+    masked="$base"
+    # i[3-6]86
+    while [[ "$masked" =~ (^|[-_])i[3-6]86([-_]|$) ]]; do
+        masked="${masked//${BASH_REMATCH[0]}/${BASH_REMATCH[1]}masq${BASH_REMATCH[2]}}"
+    done
+    # x86_64 / x86-64
+    masked="${masked//x86_64/masq}"
+    masked="${masked//x86-64/masq}"
+    # x64 (standalone token — only replace when surrounded by delimiters or at boundary)
+    masked="${masked//x64/masq}"
+    # xf86 / xf_86 / Xf86 / XF86 / XF_86
+    masked="${masked//xf86/masq}"
+    masked="${masked//xf_86/masq}"
+    masked="${masked//Xf86/masq}"
+    masked="${masked//XF86/masq}"
+    masked="${masked//XF_86/masq}"
+    # Qt4 / qt4
+    masked="${masked//Qt4/masq}"
+    masked="${masked//qt4/masq}"
+    # _64 suffix (e.g. app_64)
+    masked="${masked//_64/_masq}"
+    IFS='-_' read -r -a tokens <<< "$masked"
+
+    for idx in "${!tokens[@]}"; do
+        token="${tokens[$idx]}"
+        [ -n "$token" ] || continue
+        if [[ "$token" =~ ^[0-9][A-Za-z0-9._+-]*$ ]] || { [ "$idx" -gt 0 ] && [[ "$token" =~ ^[A-Za-z]{1,2}[0-9][A-Za-z0-9._+-]*$ ]]; }; then
+            split_at="$idx"
+            break
+        fi
+    done
+
+    if [ "$split_at" -lt 0 ]; then
+        return 1
+    fi
+
+    for idx in "${!tokens[@]}"; do
+        token="${tokens[$idx]}"
+        [ -n "$token" ] || continue
+        if [ "$idx" -lt "$split_at" ]; then
+            case "$token" in
+                masq)
+                    continue
+                    ;;
+            esac
+            identity_tokens+=("$token")
+            continue
+        fi
+
+        case "$token" in
+            masq)
+                continue
+                ;;
+        esac
+        if [[ "$token" =~ ^[0-9][A-Za-z0-9._+-]*$ ]] || [[ "$token" =~ ^[A-Za-z]{1,2}[0-9][A-Za-z0-9._+-]*$ ]]; then
+            version_tokens+=("$token")
+        fi
+    done
+
+    [ "${#identity_tokens[@]}" -gt 0 ] || return 1
+    [ "${#version_tokens[@]}" -gt 0 ] || return 1
+
+    identity="${identity_tokens[0]}"
+    for idx in "${!identity_tokens[@]}"; do
+        [ "$idx" -eq 0 ] && continue
+        identity+="-${identity_tokens[$idx]}"
+    done
+
+    version="${version_tokens[0]}"
+    for idx in "${!version_tokens[@]}"; do
+        [ "$idx" -eq 0 ] && continue
+        version+="-${version_tokens[$idx]}"
+    done
+
+    printf '%s\t%s\n' "$identity" "$version"
+}
+
+_update_version_is_newer() {
+    local lhs="$1"
+    local rhs="$2"
+    local top=""
+
+    [ -n "$lhs" ] || return 1
+    [ -n "$rhs" ] || return 1
+    [ "$lhs" != "$rhs" ] || return 1
+
+    top=$(printf '%s\n%s\n' "$lhs" "$rhs" | sort -V | tail -n 1)
+    [ "$top" = "$lhs" ]
+}
+
+_update_repo_order_index() {
+    local repo="$1"
+    local idx=0
+    local url=""
+
+    while IFS= read -r url; do
+        [ -n "$url" ] || continue
+        if [ "$url" = "$repo" ]; then
+            printf '%s\n' "$idx"
+            return 0
+        fi
+        idx=$((idx + 1))
+    done < <(iter_repos)
+
+    printf '999999\n'
+    return 0
+}
+
+_update_cache_repo_url() {
+    local line="$1"
+    local field=""
+    local repo=""
+    local -a fields=()
+
+    IFS=$'\t' read -r -a fields <<< "$line"
+    for field in "${fields[@]}"; do
+        case "$field" in
+            http://*|https://*)
+                repo="$field"
+                ;;
+        esac
+    done
+    printf '%s' "$repo"
+}
+
+# ==========================================
+# BLACKLIST HELPERS
+# ==========================================
+
+# Return the path to the blacklist file (respects UPDATE_BLACKLIST_FILE override).
+_blacklist_file() {
+    printf '%s' "${UPDATE_BLACKLIST_FILE}"
+}
+
+_blacklist_legacy_file() {
+    printf '%s' "${LEGACY_UPDATE_BLACKLIST_FILE:-}"
+}
+
+_blacklist_migrate_legacy() {
+    local bf legacy
+
+    bf=$(_blacklist_file)
+    legacy=$(_blacklist_legacy_file)
+
+    [ -n "$legacy" ] || return 0
+    [ "$legacy" != "$bf" ] || return 0
+    [ -f "$legacy" ] || return 0
+    [ ! -f "$bf" ] || return 0
+
+    mkdir -p "$(dirname "$bf")" 2>/dev/null || true
+    cp -p -- "$legacy" "$bf" 2>/dev/null || cp -- "$legacy" "$bf" 2>/dev/null || return 0
+    _blacklist_publish_file
+}
+
+_blacklist_read_file() {
+    local bf legacy
+
+    _blacklist_migrate_legacy
+
+    bf=$(_blacklist_file)
+    if [ -f "$bf" ]; then
+        printf '%s' "$bf"
+        return 0
+    fi
+
+    legacy=$(_blacklist_legacy_file)
+    if [ -n "$legacy" ] && [ "$legacy" != "$bf" ] && [ -f "$legacy" ]; then
+        printf '%s' "$legacy"
+        return 0
+    fi
+
+    return 1
+}
+
+# Return the lock file path for the blacklist (same dir as the blacklist file).
+_blacklist_lock_file() {
+    local bf
+    bf=$(_blacklist_file)
+    printf '%s' "${bf%/*}/.update-blacklist.lock"
+}
+
+_blacklist_publish_file() {
+    local bf
+    bf=$(_blacklist_file)
+
+    [ -f "$bf" ] || return 0
+    chmod 0644 "$bf" 2>/dev/null || true
+}
+
+# Check if identity+version is blacklisted. Returns 0 if blacklisted.
+_blacklist_is_entry() {
+    local identity="$1"
+    local version="$2"
+    local bf
+    bf=$(_blacklist_read_file) || return 1
+    local line=""
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        local bl_identity bl_version
+        IFS=$'\t' read -r bl_identity bl_version <<< "$line"
+        if [ "$bl_identity" = "$identity" ] && [ "$bl_version" = "$version" ]; then
+            return 0
+        fi
+    done < "$bf"
+    return 1
+}
+
+# Append an entry to the blacklist (identity<TAB>version). Acquires lock.
+_blacklist_add_entry() {
+    local identity="$1"
+    local version="$2"
+    local bf
+    bf=$(_blacklist_file)
+    local lf
+    lf=$(_blacklist_lock_file)
+    mkdir -p "$(dirname "$bf")" 2>/dev/null || true
+    (
+        flock -x 9
+        _blacklist_migrate_legacy
+        # Avoid duplicates.
+        if [ -f "$bf" ]; then
+            local line=""
+            while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                local bl_identity bl_version
+                IFS=$'\t' read -r bl_identity bl_version <<< "$line"
+                if [ "$bl_identity" = "$identity" ] && [ "$bl_version" = "$version" ]; then
+                    _blacklist_publish_file
+                    return 0
+                fi
+            done < "$bf"
+        fi
+        printf '%s\t%s\n' "$identity" "$version" >> "$bf"
+        _blacklist_publish_file
+    ) 9>"$lf"
+}
+
+# Remove a matching entry from the blacklist. Acquires lock.
+_blacklist_remove_entry() {
+    local identity="$1"
+    local version="$2"
+    local bf
+    bf=$(_blacklist_file)
+    local lf
+    lf=$(_blacklist_lock_file)
+    _blacklist_migrate_legacy
+    [ -f "$bf" ] || return 0
+    (
+        flock -x 9
+        local tmp
+        tmp=$(mktemp "${bf}.XXXXXX")
+        local line=""
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            local bl_identity bl_version
+            IFS=$'\t' read -r bl_identity bl_version <<< "$line"
+            if [ "$bl_identity" = "$identity" ] && [ "$bl_version" = "$version" ]; then
+                continue
+            fi
+            printf '%s\n' "$line"
+        done < "$bf" > "$tmp"
+        mv -f "$tmp" "$bf"
+        _blacklist_publish_file
+    ) 9>"$lf"
+}
+
+# Print the blacklist sorted by identity then version (TSV: identity<TAB>version).
+_blacklist_list_entries() {
+    local bf
+    bf=$(_blacklist_read_file) || return 0
+    _blacklist_publish_file
+    sort -t $'\t' -k1,1 -k2,2V "$bf"
+}
+
+# ==========================================
+# BLACKLIST COMMANDS
+# ==========================================
+
+update_blacklist_list() {
+    _blacklist_list_entries
+}
+
+update_blacklist_add() {
+    local arg="$1"
+    [ -n "$arg" ] || { fatal_err "update-blacklist-add: требуется аргумент <id-or-candidate>"; return 1; }
+
+    local parsed=""
+    local identity="" version=""
+
+    if [[ "$arg" =~ ^[0-9a-f]{64}$ ]]; then
+        local row_type="" row_id="" row_identity="" row_old_version="" row_new_version=""
+        local row_installed_path="" row_candidate_filename="" row_repo="" row_risk="" row_reboot="" row_message=""
+
+        while IFS=$'\t' read -r row_type row_id row_identity row_old_version row_new_version row_installed_path row_candidate_filename row_repo row_risk row_reboot row_message; do
+            [ "$row_type" = "update" ] || continue
+            [ "$row_id" = "$arg" ] || continue
+            identity="$row_identity"
+            version="$row_new_version"
+            break
+        done < <(check_updates 2>/dev/null)
+
+        if [ -z "$identity" ] || [ -z "$version" ]; then
+            fatal_err "update-blacklist-add: id '$arg' не найден в --check-updates"
+            return 1
+        fi
+    else
+        # Try to resolve arg as a candidate filename (identity-version.ext).
+        parsed=$(_update_split_identity_version "$arg" 2>/dev/null || true)
+    fi
+
+    if [ -n "$parsed" ]; then
+        IFS=$'\t' read -r identity version <<< "$parsed"
+    elif [ -z "$identity" ] || [ -z "$version" ]; then
+        # Arg may be just an identity without version — look up best candidate.
+        identity="$arg"
+        # Find the newest candidate for this identity in the cache.
+        local line="" candidate_filename="" candidate_identity="" candidate_version=""
+        local best_version="" best_filename=""
+        if [ -f "$CACHE_FILE" ]; then
+            while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                candidate_filename=${line%%$'\t'*}
+                [ -n "$candidate_filename" ] || continue
+                local p=""
+                p=$(_update_split_identity_version "$candidate_filename" 2>/dev/null || true)
+                [ -n "$p" ] || continue
+                IFS=$'\t' read -r candidate_identity candidate_version <<< "$p"
+                [ "$candidate_identity" = "$identity" ] || continue
+                if [ -z "$best_version" ] || _update_version_is_newer "$candidate_version" "$best_version"; then
+                    best_version="$candidate_version"
+                    best_filename="$candidate_filename"
+                fi
+            done < "$CACHE_FILE"
+        fi
+        if [ -z "$best_version" ]; then
+            fatal_err "update-blacklist-add: кандидат для '$arg' не найден в кэше"
+            return 1
+        fi
+        version="$best_version"
+    fi
+
+    [ -n "$identity" ] || { fatal_err "update-blacklist-add: не удалось определить identity из '$arg'"; return 1; }
+    [ -n "$version" ] || { fatal_err "update-blacklist-add: не удалось определить version из '$arg'"; return 1; }
+
+    _blacklist_add_entry "$identity" "$version"
+    print_ok "Добавлено в чёрный список: $identity $version"
+}
+
+update_blacklist_remove() {
+    local identity="$1"
+    local version="$2"
+    [ -n "$identity" ] || { fatal_err "update-blacklist-remove: требуется <identity> <version>"; return 1; }
+    [ -n "$version" ] || { fatal_err "update-blacklist-remove: требуется <identity> <version>"; return 1; }
+    _blacklist_remove_entry "$identity" "$version"
+    print_ok "Удалено из чёрного списка: $identity $version"
+}
+
+_update_best_candidate_for_identity() {
+    local identity="$1"
+    local installed_version="$2"
+    local line=""
+    local candidate_filename=""
+    local repo=""
+    local parsed=""
+    local candidate_identity=""
+    local candidate_version=""
+    local candidate_repo_rank=999999
+    local best_filename=""
+    local best_repo=""
+    local best_version=""
+    local best_repo_rank=999999
+
+    [ -f "$CACHE_FILE" ] || return 1
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        candidate_filename=${line%%$'\t'*}
+        [ -n "$candidate_filename" ] || continue
+
+        parsed=$(_update_split_identity_version "$candidate_filename" 2>/dev/null || true)
+        [ -n "$parsed" ] || continue
+        IFS=$'\t' read -r candidate_identity candidate_version <<< "$parsed"
+        [ "$candidate_identity" = "$identity" ] || continue
+
+        _update_version_is_newer "$candidate_version" "$installed_version" || continue
+
+        # Skip blacklisted versions (exact identity+version match).
+        _blacklist_is_entry "$candidate_identity" "$candidate_version" && continue
+
+        repo=$(_update_cache_repo_url "$line")
+        [ -n "$repo" ] || repo="discovery"
+        candidate_repo_rank=$(_update_repo_order_index "$repo")
+
+        if [ -z "$best_version" ]; then
+            best_filename="$candidate_filename"
+            best_repo="$repo"
+            best_version="$candidate_version"
+            best_repo_rank="$candidate_repo_rank"
+            continue
+        fi
+
+        if _update_version_is_newer "$candidate_version" "$best_version"; then
+            best_filename="$candidate_filename"
+            best_repo="$repo"
+            best_version="$candidate_version"
+            best_repo_rank="$candidate_repo_rank"
+            continue
+        fi
+
+        if [ "$candidate_version" = "$best_version" ] && [ "$candidate_filename" = "$best_filename" ] && [ "$candidate_repo_rank" -lt "$best_repo_rank" ]; then
+            best_repo="$repo"
+            best_repo_rank="$candidate_repo_rank"
+        fi
+    done < <(grep -F -- "$identity" "$CACHE_FILE" 2>/dev/null || true)
+
+    [ -n "$best_version" ] || return 1
+    printf '%s\t%s\t%s\n' "$best_filename" "$best_version" "$best_repo"
+}
+
+# Emit blacklist rows for identity+installed_version when --include-blacklisted is set.
+# Scans cache for all newer blacklisted versions and emits a "blacklist" row for each.
+_update_emit_blacklisted_for_identity() {
+    local identity="$1"
+    local installed_version="$2"
+    local resolved="$3"
+    local risk="$4"
+    local reboot_required="$5"
+
+    [ -f "$CACHE_FILE" ] || return 0
+
+    local line="" candidate_filename="" candidate_identity="" candidate_version="" repo="" parsed=""
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        candidate_filename=${line%%$'\t'*}
+        [ -n "$candidate_filename" ] || continue
+
+        parsed=$(_update_split_identity_version "$candidate_filename" 2>/dev/null || true)
+        [ -n "$parsed" ] || continue
+        IFS=$'\t' read -r candidate_identity candidate_version <<< "$parsed"
+        [ "$candidate_identity" = "$identity" ] || continue
+
+        _update_version_is_newer "$candidate_version" "$installed_version" || continue
+
+        _blacklist_is_entry "$candidate_identity" "$candidate_version" || continue
+
+        repo=$(_update_cache_repo_url "$line")
+        [ -n "$repo" ] || repo="discovery"
+
+        local candidate_id=""
+        candidate_id=$(_update_candidate_id "$resolved" "$identity" "$candidate_version" "$candidate_filename" "$repo") || continue
+        _update_emit_row update \
+            "$candidate_id" \
+            "$identity" \
+            "$installed_version" \
+            "$candidate_version" \
+            "$resolved" \
+            "$candidate_filename" \
+            "$repo" \
+            "$risk" \
+            "$reboot_required" \
+            "blacklisted" || true
+    done < <(grep -F -- "$identity" "$CACHE_FILE" 2>/dev/null || true)
+}
+
+# ==========================================
+# ПРИМЕНЕНИЕ ОБНОВЛЕНИЙ
+# ==========================================
+
+# _update_acquire_lock DIR
+# Захватывает ${CACHE_DIR}/update.lock через mkdir (атомарно).
+# Устанавливает ловушку на выход для освобождения блокировки.
+_update_acquire_lock() {
+    local lock_dir="${CACHE_DIR}/update.lock"
+    local deadline=$(( $(date +%s) + 30 ))
+    while ! mkdir -- "$lock_dir" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            fatal_err "Не удалось захватить блокировку обновления: $lock_dir занят"
+            return 1
+        fi
+        sleep 0.2
+    done
+    # shellcheck disable=SC2064
+    trap "rmdir -- '$lock_dir' 2>/dev/null; trap - EXIT" EXIT
+    return 0
+}
+
+# _update_release_lock
+_update_release_lock() {
+    local lock_dir="${CACHE_DIR}/update.lock"
+    rmdir -- "$lock_dir" 2>/dev/null || true
+    trap - EXIT
+}
+
+# _update_next_old_suffix PATH
+# Возвращает следующий свободный суффикс: .old, .old.1, .old.2, …
+_update_next_old_suffix() {
+    local base="$1"
+    local candidate="${base}.old"
+    if [ ! -e "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    local n=1
+    while [ -e "${base}.old.${n}" ]; do
+        n=$(( n + 1 ))
+    done
+    printf '%s\n' "${base}.old.${n}"
+}
+
+# _update_validate_candidate_filename FILENAME
+# Проверяет: только basename, нет слэша/таба/новой строки, расширение .pfs (или $EXT).
+_update_validate_candidate_filename() {
+    local fn="$1"
+    # Нет слэша
+    [[ "$fn" == */* ]] && { fatal_err "Недопустимое имя кандидата (содержит /): $fn"; return 1; }
+    # Нет таба
+    [[ "$fn" == *$'\t'* ]] && { fatal_err "Недопустимое имя кандидата (содержит TAB): $fn"; return 1; }
+    # Нет новой строки
+    [[ "$fn" == *$'\n'* ]] && { fatal_err "Недопустимое имя кандидата (содержит newline): $fn"; return 1; }
+    # Непустое
+    [ -n "$fn" ] || { fatal_err "Пустое имя кандидата"; return 1; }
+    # Расширение .pfs (или $EXT)
+    local ext="${EXT:-pfs}"
+    [[ "$fn" == *."$ext" ]] || { fatal_err "Недопустимое расширение кандидата (ожидается .${ext}): $fn"; return 1; }
+    return 0
+}
+
+# _update_download_candidate CANDIDATE_FILENAME REPO INSTALLED_PATH
+# Скачивает кандидата во временный файл рядом с installed_path (если writable),
+# иначе в ${CACHE_DIR}/updates. Выводит путь к временному файлу.
+_update_download_candidate() {
+    local candidate_filename="$1"
+    local repo="$2"
+    local installed_path="$3"
+
+    local installed_dir
+    installed_dir=$(dirname "$installed_path")
+
+    local tmp_dir
+    if [ -w "$installed_dir" ]; then
+        tmp_dir="$installed_dir"
+    else
+        tmp_dir="${CACHE_DIR}/updates"
+        mkdir -p "$tmp_dir" 2>/dev/null || true
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp "${tmp_dir}/.update_candidate_XXXXXX.${EXT:-pfs}") || {
+        fatal_err "Не удалось создать временный файл в $tmp_dir"
+        return 1
+    }
+
+    local dl_ok=0
+    local progress_file="${MODMAN_PROGRESS_FILE:-}"
+    if [ -n "$repo" ] && [[ "$repo" == http* ]]; then
+        if [ -n "$progress_file" ]; then
+            rm -f -- "$progress_file" 2>/dev/null
+            printf 'name=%s\nstage=download\npct=0\n' "$candidate_filename" > "$progress_file"
+            wget --progress=dot:binary -O "$tmp_file" "${repo}/${candidate_filename}" 2>&1 | \
+                awk -v PF="$progress_file" -v NM="$candidate_filename" '
+                    /[0-9]+%/ {
+                        if (match($0, /[0-9]+%/)) {
+                            pct = substr($0, RSTART, RLENGTH - 1)
+                            printf "name=%s\nstage=download\npct=%s\n", NM, pct > PF
+                            close(PF)
+                        }
+                    }
+                '
+            [ "${PIPESTATUS[0]}" -eq 0 ] && dl_ok=1
+        elif [ "$MACHINE_MODE" -eq 1 ]; then
+            wget -q -O "$tmp_file" "${repo}/${candidate_filename}" 2>/dev/null && dl_ok=1
+        else
+            wget --show-progress -O "$tmp_file" "${repo}/${candidate_filename}" 2>&1 && dl_ok=1
+        fi
+    else
+        # Попробовать все репозитории
+        local repo_url
+        while IFS= read -r repo_url; do
+            [ -n "$repo_url" ] || continue
+            if [ -n "$progress_file" ]; then
+                rm -f -- "$progress_file" 2>/dev/null
+                printf 'name=%s\nstage=download\npct=0\n' "$candidate_filename" > "$progress_file"
+                wget --progress=dot:binary -O "$tmp_file" "${repo_url}/${candidate_filename}" 2>&1 | \
+                    awk -v PF="$progress_file" -v NM="$candidate_filename" '
+                        /[0-9]+%/ {
+                            if (match($0, /[0-9]+%/)) {
+                                pct = substr($0, RSTART, RLENGTH - 1)
+                                printf "name=%s\nstage=download\npct=%s\n", NM, pct > PF
+                                close(PF)
+                            }
+                        }
+                    '
+                [ "${PIPESTATUS[0]}" -eq 0 ] && { dl_ok=1; break; }
+            elif [ "$MACHINE_MODE" -eq 1 ]; then
+                wget -q -O "$tmp_file" "${repo_url}/${candidate_filename}" 2>/dev/null && { dl_ok=1; break; }
+            else
+                wget --show-progress -O "$tmp_file" "${repo_url}/${candidate_filename}" 2>&1 && { dl_ok=1; break; }
+            fi
+        done < <(iter_repos)
+    fi
+
+    if [ "$dl_ok" -eq 0 ] || [ ! -s "$tmp_file" ]; then
+        rm -f "$tmp_file"
+        fatal_err "Не удалось скачать кандидата: $candidate_filename"
+        return 1
+    fi
+
+    printf '%s\n' "$tmp_file"
+    return 0
+}
+
+# apply_update ID
+# Применяет одно обновление по id из --check-updates.
+# Выход 8 если system-риск без --confirm-system-updates.
+apply_update() {
+    local target_id="$1"
+
+    [ -n "$target_id" ] || {
+        fatal_err "--update требует id обновления"
+        exit 2
+    }
+
+    # Получаем строку обновления из check_updates
+    local update_row=""
+    local row_id row_identity row_old_version row_new_version
+    local row_installed_path row_candidate_filename row_repo row_risk row_reboot row_message
+
+    while IFS=$'\t' read -r _type row_id row_identity row_old_version row_new_version \
+            row_installed_path row_candidate_filename row_repo row_risk row_reboot row_message; do
+        [ "$_type" = "update" ] || continue
+        [ "$row_id" = "$target_id" ] || continue
+        update_row="$_type"$'\t'"$row_id"$'\t'"$row_identity"$'\t'"$row_old_version"$'\t'"$row_new_version"$'\t'"$row_installed_path"$'\t'"$row_candidate_filename"$'\t'"$row_repo"$'\t'"$row_risk"$'\t'"$row_reboot"$'\t'"$row_message"
+        break
+    done < <(check_updates 2>/dev/null)
+
+    if [ -z "$update_row" ]; then
+        if [ "$MACHINE_MODE" -eq 1 ]; then
+            _update_emit_row error "not-found" "$target_id" "id не найден в --check-updates" || true
+        else
+            fatal_err "Обновление с id '$target_id' не найдено"
+        fi
+        exit 1
+    fi
+
+    # Проверка system-риска
+    if [ "$row_risk" = "system" ] && [ "$CONFIRM_SYSTEM_UPDATES" -eq 0 ]; then
+        if [ "$MACHINE_MODE" -eq 1 ]; then
+            _update_emit_row skipped "needs_confirmation" "$target_id" "нужна перезагрузка" || true
+        else
+            fatal_err "Модуль '$row_identity' является системным (risk=system). Используйте --confirm-system-updates для принудительного обновления."
+        fi
+        exit 8
+    fi
+
+    # Валидация имени кандидата
+    _update_validate_candidate_filename "$row_candidate_filename" || exit 2
+
+    # Захват блокировки
+    _update_acquire_lock || exit 1
+
+    # Скачивание кандидата
+    local tmp_candidate
+    tmp_candidate=$(_update_download_candidate "$row_candidate_filename" "$row_repo" "$row_installed_path") || {
+        _update_release_lock
+        exit 1
+    }
+
+    # Ротация: переименовываем старый файл в .old (или .old.N)
+    local old_backup=""
+    old_backup=$(_update_next_old_suffix "$row_installed_path")
+
+    if ! mv -- "$row_installed_path" "$old_backup" 2>/dev/null; then
+        rm -f "$tmp_candidate"
+        _update_release_lock
+        fatal_err "Не удалось переименовать $row_installed_path → $old_backup"
+        exit 1
+    fi
+
+    # Перемещение нового файла на место
+    local new_path
+    new_path="$(dirname "$row_installed_path")/${row_candidate_filename}"
+
+    if ! mv -- "$tmp_candidate" "$new_path" 2>/dev/null; then
+        # Откат: восстанавливаем старый файл
+        mv -- "$old_backup" "$row_installed_path" 2>/dev/null || true
+        _update_release_lock
+        fatal_err "Не удалось переместить кандидата на место $new_path — откат выполнен"
+        exit 1
+    fi
+
+    # Запись update.log
+    local log_dir
+    log_dir="$(dirname "$row_installed_path")"
+    {
+        printf '%s\n' "$(date -Iseconds)"
+        printf 'old=%s\n' "$(basename "$old_backup")"
+        printf 'new=%s\n' "$row_candidate_filename"
+        printf 'id=%s\n' "$target_id"
+    } >> "${log_dir}/update.log" 2>/dev/null || true
+
+    _update_release_lock
+
+    # Вывод результата
+    if [ "$MACHINE_MODE" -eq 1 ]; then
+        _update_emit_row applied \
+            "$target_id" \
+            "$row_installed_path" \
+            "$new_path" \
+            "$old_backup" \
+            "$row_risk" \
+            "$row_reboot" \
+            "$row_message" || true
+    else
+        print_ok "Обновлено: $row_identity $row_old_version → $row_new_version"
+        print_msg "  Старый файл: $old_backup"
+        print_msg "  Новый файл:  $new_path"
+    fi
+
+    return 0
+}
+
+# update_all
+# Применяет все доступные обновления.
+# Системные (risk=system) пропускаются без --confirm-system-updates.
+update_all() {
+    local row_id row_identity row_old_version row_new_version
+    local row_installed_path row_candidate_filename row_repo row_risk row_reboot row_message
+    local _type
+    local applied_count=0
+    local skipped_count=0
+    local error_count=0
+
+    while IFS=$'\t' read -r _type row_id row_identity row_old_version row_new_version \
+            row_installed_path row_candidate_filename row_repo row_risk row_reboot row_message; do
+        [ "$_type" = "update" ] || continue
+
+        # Системные без подтверждения — пропускаем
+        if [ "$row_risk" = "system" ] && [ "$CONFIRM_SYSTEM_UPDATES" -eq 0 ]; then
+            if [ "$MACHINE_MODE" -eq 1 ]; then
+                _update_emit_row skipped "needs_confirmation" "$row_id" "нужна перезагрузка" || true
+            else
+                print_msg "Пропущен (system): $row_identity $row_old_version → $row_new_version (используйте --confirm-system-updates)"
+            fi
+            skipped_count=$(( skipped_count + 1 ))
+            continue
+        fi
+
+        # Валидация имени кандидата
+        if ! _update_validate_candidate_filename "$row_candidate_filename" 2>/dev/null; then
+            if [ "$MACHINE_MODE" -eq 1 ]; then
+                _update_emit_row error "invalid-filename" "$row_id" "недопустимое имя кандидата: $row_candidate_filename" || true
+            fi
+            error_count=$(( error_count + 1 ))
+            continue
+        fi
+
+        # Захват блокировки
+        if ! _update_acquire_lock 2>/dev/null; then
+            if [ "$MACHINE_MODE" -eq 1 ]; then
+                _update_emit_row error "lock-failed" "$row_id" "не удалось захватить блокировку" || true
+            fi
+            error_count=$(( error_count + 1 ))
+            continue
+        fi
+
+        # Скачивание
+        local tmp_candidate
+        if ! tmp_candidate=$(_update_download_candidate "$row_candidate_filename" "$row_repo" "$row_installed_path" 2>/dev/null); then
+            _update_release_lock
+            if [ "$MACHINE_MODE" -eq 1 ]; then
+                _update_emit_row error "download-failed" "$row_id" "не удалось скачать $row_candidate_filename" || true
+            fi
+            error_count=$(( error_count + 1 ))
+            continue
+        fi
+
+        # Ротация
+        local old_backup
+        old_backup=$(_update_next_old_suffix "$row_installed_path")
+
+        if ! mv -- "$row_installed_path" "$old_backup" 2>/dev/null; then
+            rm -f "$tmp_candidate"
+            _update_release_lock
+            if [ "$MACHINE_MODE" -eq 1 ]; then
+                _update_emit_row error "rename-failed" "$row_id" "не удалось переименовать $row_installed_path" || true
+            fi
+            error_count=$(( error_count + 1 ))
+            continue
+        fi
+
+        local new_path
+        new_path="$(dirname "$row_installed_path")/${row_candidate_filename}"
+
+        if ! mv -- "$tmp_candidate" "$new_path" 2>/dev/null; then
+            mv -- "$old_backup" "$row_installed_path" 2>/dev/null || true
+            _update_release_lock
+            if [ "$MACHINE_MODE" -eq 1 ]; then
+                _update_emit_row error "move-failed" "$row_id" "не удалось переместить кандидата — откат выполнен" || true
+            fi
+            error_count=$(( error_count + 1 ))
+            continue
+        fi
+
+        # update.log
+        local log_dir
+        log_dir="$(dirname "$row_installed_path")"
+        {
+            printf '%s\n' "$(date -Iseconds)"
+            printf 'old=%s\n' "$(basename "$old_backup")"
+            printf 'new=%s\n' "$row_candidate_filename"
+            printf 'id=%s\n' "$row_id"
+        } >> "${log_dir}/update.log" 2>/dev/null || true
+
+        _update_release_lock
+
+        if [ "$MACHINE_MODE" -eq 1 ]; then
+            _update_emit_row applied \
+                "$row_id" \
+                "$row_installed_path" \
+                "$new_path" \
+                "$old_backup" \
+                "$row_risk" \
+                "$row_reboot" \
+                "$row_message" || true
+        else
+            print_ok "Обновлено: $row_identity $row_old_version → $row_new_version"
+        fi
+        applied_count=$(( applied_count + 1 ))
+
+    done < <(check_updates 2>/dev/null)
+
+    if [ "$MACHINE_MODE" -eq 0 ]; then
+        print_msg "Применено: $applied_count, пропущено: $skipped_count, ошибок: $error_count"
+    fi
+
+    [ "$error_count" -eq 0 ] || return 1
+    return 0
+}
+
+check_updates() {
+    local all_discovered=""
+    local rootaufs2_root=""
+    local resolved=""
+    local risk=""
+    local reboot_required=""
+    local message=""
+    local identity=""
+    local old_version=""
+    local new_version=""
+    local candidate_filename=""
+    local repo=""
+    local candidate_id=""
+    local fixture_candidate_id=""
+    local parsed_installed=""
+    local candidate_row=""
+    local skip_message=""
+    local _cu_path=""
+    local _cu_source=""
+
+    if [ "$MACHINE_MODE" -eq 1 ] && [ "${MODMAN_TEST_CHECK_UPDATES_FIXTURE:-0}" = "1" ]; then
+        fixture_candidate_id=$(_update_candidate_id \
+            "${MODMAN_TEST_INSTALLED_PATH:-/tmp/fixture/module-1.0.pfs}" \
+            "${MODMAN_TEST_IDENTITY:-module}" \
+            "${MODMAN_TEST_NEW_VERSION:-1.1}" \
+            "${MODMAN_TEST_CANDIDATE_FILENAME:-module-1.1.pfs}" \
+            "${MODMAN_TEST_REPO:-fixture-repo}") || {
+            fatal_err "Не удалось вычислить id кандидата обновления"
+            return 1
+        }
+
+        _update_emit_row update \
+            "$fixture_candidate_id" \
+            "${MODMAN_TEST_IDENTITY:-module}" \
+            "${MODMAN_TEST_OLD_VERSION:-1.0}" \
+            "${MODMAN_TEST_NEW_VERSION:-1.1}" \
+            "${MODMAN_TEST_INSTALLED_PATH:-/tmp/fixture/module-1.0.pfs}" \
+            "${MODMAN_TEST_CANDIDATE_FILENAME:-module-1.1.pfs}" \
+            "${MODMAN_TEST_REPO:-fixture-repo}" \
+            "${MODMAN_TEST_RISK:-normal}" \
+            "${MODMAN_TEST_REBOOT_REQUIRED:-0}" \
+            "${MODMAN_TEST_MESSAGE:-fixture update row}" || return 1
+        return 0
+    fi
+
+    rootaufs2_root=$(_discovery_rootaufs2_root 2>/dev/null || true)
+
+    all_discovered+="$(_update_discover_from_dirs < <(_local_module_dirs | awk '!seen[$0]++'))"$'\n'
+    all_discovered+="$(_update_discover_extramod_dir)"$'\n'
+    all_discovered+="$(_update_discover_from_losetup)"$'\n'
+
+    # Build associative arrays once. mod-up scans repo metadata once per run; do
+    # the same here instead of re-reading CACHE_FILE for every installed module.
+    # loaded_before/after discovery via pfsinfo is intentionally removed: pfsinfo
+    # returns runtime memory-copies that don't exist as regular files, causing 45s
+    # of wasted realpath+stat per path. Risk is now path-based only (see
+    # _update_risk_fast). losetup_paths still needed for losetup→loaded heuristic.
+    declare -A _cu_losetup_map=()
+    declare -A _cu_discovered_map=()
+
+    while IFS=$'\t' read -r _cu_path _cu_source _; do
+        [ -n "$_cu_path" ] || continue
+        _cu_discovered_map["$_cu_path"]=1
+        [ "$_cu_source" = "losetup" ] && _cu_losetup_map["$_cu_path"]=1
+    done <<< "$all_discovered"
+
+    while IFS= read -r resolved; do
+        [ -n "$resolved" ] || continue
+        [ -f "$resolved" ] || {
+            _update_warn_optional "skip vanished file: $resolved"
+            continue
+        }
+
+        if [ "$MACHINE_MODE" -eq 1 ]; then
+            # Use bash parameter expansion instead of basename fork
+            parsed_installed=$(_update_split_identity_version "${resolved##*/}" 2>/dev/null || true)
+            if [ -z "$parsed_installed" ]; then
+                if [ "$UPDATE_VERBOSE_SKIPS" -eq 1 ]; then
+                    _update_emit_row skipped "version-unparsed" "" "version-unparsed" || true
+                fi
+                continue
+            fi
+            IFS=$'\t' read -r identity old_version <<< "$parsed_installed"
+
+            candidate_row=$(_update_best_candidate_for_identity "$identity" "$old_version" 2>/dev/null || true)
+
+            # Compute risk using zero-fork fast path (path-based, no pfsinfo).
+            # _RISK_RESULT is set by _update_risk_fast.
+            _RISK_RESULT=""
+            _update_risk_fast "$resolved" "$rootaufs2_root" _cu_losetup_map
+            IFS=$'\t' read -r risk reboot_required message <<< "$_RISK_RESULT"
+
+            # When --include-blacklisted: emit blacklisted rows regardless of whether
+            # a non-blacklisted candidate exists.
+            if [ "$INCLUDE_BLACKLISTED" -eq 1 ]; then
+                _update_emit_blacklisted_for_identity \
+                    "$identity" "$old_version" "$resolved" "$risk" "$reboot_required" || true
+            fi
+
+            [ -n "$candidate_row" ] || continue
+            IFS=$'\t' read -r candidate_filename new_version repo <<< "$candidate_row"
+
+            skip_message=""
+            if [ -z "$new_version" ]; then
+                skip_message="version-unparsed"
+            fi
+            if [ -n "$skip_message" ]; then
+                if [ "$UPDATE_VERBOSE_SKIPS" -eq 1 ]; then
+                    _update_emit_row skipped "version-unparsed" "" "$skip_message" || true
+                fi
+                continue
+            fi
+
+            candidate_id=$(_update_candidate_id "$resolved" "$identity" "$new_version" "$candidate_filename" "$repo") || {
+                _update_warn_optional "id generation failed for: $resolved"
+                continue
+            }
+            _update_emit_row update \
+                "$candidate_id" \
+                "$identity" \
+                "$old_version" \
+                "$new_version" \
+                "$resolved" \
+                "$candidate_filename" \
+                "$repo" \
+                "$risk" \
+                "$reboot_required" \
+                "$message" || continue
+        else
+            _RISK_RESULT=""
+            _update_risk_fast "$resolved" "$rootaufs2_root" _cu_losetup_map
+            IFS=$'\t' read -r risk reboot_required message <<< "$_RISK_RESULT"
+            printf '%s\t%s\t%s\n' "$risk" "$reboot_required" "$resolved"
+        fi
+    done < <(printf '%s\n' "${!_cu_discovered_map[@]}" | sort)
+
+    return 0
+}
+
+# Cache: aufs si_id + branches list. Set to "" if aufs not available.
+# Format: _AUFS_BRANCHES is newline-separated lines "INDEX<TAB>PATH<TAB>PERMS".
+_AUFS_SI_ID=""
+_AUFS_BRANCHES=""
+_PROC_MOUNTS_CACHE=""
+
+_init_loaded_caches() {
+    _PROC_MOUNTS_CACHE=$(cat /proc/mounts 2>/dev/null || true)
+
+    # Find aufs root mount and its si= option.
+    _AUFS_SI_ID=$(awk '
+        $3=="aufs" {
+            n=split($4, opts, ",")
+            for(i=1;i<=n;i++) {
+                if (opts[i] ~ /^si=/) {
+                    sub(/^si=/, "", opts[i])
+                    print opts[i]
+                    exit
+                }
+            }
+        }
+    ' /proc/mounts 2>/dev/null)
+    [ -z "$_AUFS_SI_ID" ] && return
+
+    # Enumerate /sys/fs/aufs/si_<id>/br[0-9]* — build "INDEX\tPATH\tPERMS" lines.
+    local sysfs_dir="/sys/fs/aufs/si_${_AUFS_SI_ID}"
+    [ -d "$sysfs_dir" ] || { _AUFS_SI_ID=""; return; }
+    local f idx content branch_path branch_perm
+    _AUFS_BRANCHES=""
+    for f in "$sysfs_dir"/br[0-9]*; do
+        [ -f "$f" ] || continue
+        idx=${f##*/br}
+        content=$(cat "$f" 2>/dev/null) || continue
+        branch_path=${content%=*}
+        branch_perm=${content##*=}
+        _AUFS_BRANCHES="${_AUFS_BRANCHES}${idx}	${branch_path}	${branch_perm}
+"
+    done
+}
+
+_derive_loaded_mode() {
+    local mount_path="$1"
+    [ -z "$_AUFS_BRANCHES" ] && return
+
+    local mod_basename
+    mod_basename=${mount_path##*/}
+
+    local idx
+    idx=$(printf '%s' "$_AUFS_BRANCHES" | awk -F'\t' -v p="$mount_path" -v bn="$mod_basename" '
+        {
+            bp = $2
+            if (bp == p) { print $1; exit }
+
+            if (length(bp) < length(p) && substr(p, 1, length(bp)) == bp && substr(p, length(bp)+1, 1) == "/") {
+                if (length(bp) > best_prefix_len) { best_prefix_idx=$1; best_prefix_len=length(bp) }
+            }
+
+            n = split(bp, parts, "/")
+            bbase = parts[n]
+            bbase_strip = bbase
+            if (substr(bbase, 1, 1) == ".") bbase_strip = substr(bbase, 2)
+            if (bbase == bn || bbase_strip == bn) {
+                if (length(bp) > best_base_len) { best_base_idx=$1; best_base_len=length(bp) }
+            }
+        }
+        END {
+            if (best_prefix_idx != "") print best_prefix_idx
+            else if (best_base_idx != "") print best_base_idx
+        }
+    ')
+
+    [ -z "$idx" ] && return
+    if [ "$idx" = "0" ]; then echo "upper"; else echo "lower"; fi
+}
+
+_derive_in_ram_for_path() {
+    local mount_path="$1"
+    [ -e "$mount_path" ] || return  # path doesn't exist → unknown (graceful)
+
+    # Canonical: stat -f gives the filesystem type of the mountpoint
+    # owning this path. tmpfs/ramfs == in RAM; everything else == on disk.
+    # No loop-device lookup needed.
+    local fs_type
+    fs_type=$(stat -f -c %T -- "$mount_path" 2>/dev/null) || return
+    [ -z "$fs_type" ] && return
+
+    case "$fs_type" in
+        tmpfs|ramfs) echo "yes" ;;
+        *) echo "no" ;;
+    esac
+}
+
+_resolve_dep_or_abort() {
+    local parent="$1"
+    local dep="$2"
+    print_msg "-> Разрешение зависимости: $dep"
+    if CLI_STYLE=pacman MODMAN_EXACT_NAME=1 "$0" "${_RECURSE_FLAGS[@]}" -S "$dep"; then
+        return 0
+    fi
+    if [ "${FORCE_DEPS:-0}" -eq 1 ]; then
+        print_err "Зависимость '$dep' не разрешена, но продолжаем (--force-deps)."
+        return 0
+    fi
+    print_err "Установка $parent прервана: зависимость '$dep' не разрешена."
+    print_err "Решения:"
+    print_err "  1. Добавьте '$dep' в MODMAN_IGNORE_DEPS если она уже в составе системы"
+    print_err "  2. Установите '$dep' отдельно вручную, затем повторите установку $parent"
+    print_err "  3. Используйте --force-deps для игнорирования (НЕБЕЗОПАСНО)"
+    exit 1
+}
+
+_dep_is_ignored() {
+    local dep="$1"
+    local pattern
+    [ -n "${MODMAN_IGNORE_DEPS:-}" ] || return 1
+    for pattern in $MODMAN_IGNORE_DEPS; do
+        # shellcheck disable=SC2254
+        case "$dep" in
+            $pattern) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+_has_library() {
+    local pattern="$1"
+
+    find /lib /usr/lib /usr/lib64 -maxdepth 3 -name "$pattern" -print -quit 2>/dev/null | grep -q .
+}
+
+_dep_is_satisfied_by_system() {
+    local dep="${1,,}"
+
+    case "$dep" in
+        gtk3|030-gtk3)
+            _has_library 'libgtk-3.so*'
+            return $?
+            ;;
+        gtk2|035-gtk2)
+            _has_library 'libgtk-x11-2.0.so*'
+            return $?
+            ;;
+        030-qt4|qt4|qt4-*)
+            _has_library 'libQtCore.so*'
+            return $?
+            ;;
+        030-qt5|030-qt5-|qt5|qt5-*)
+            _has_library 'libQt5Core.so*'
+            return $?
+            ;;
+        nss|nss-)
+            _has_library 'libnss3.so*'
+            return $?
+            ;;
+        mesa|mesa-)
+            _has_library 'libGL.so*' || _has_library 'libEGL.so*'
+            return $?
+            ;;
+        ffmpeg|ffmpeg-light*|ffmpeg-*)
+            _has_library 'libavcodec.so*'
+            return $?
+            ;;
+        icu|icu-)
+            _has_library 'libicuuc.so*'
+            return $?
+            ;;
+        sane)
+            _has_library 'libsane.so*'
+            return $?
+            ;;
+        hunspell)
+            _has_library 'libhunspell*.so*'
+            return $?
+            ;;
+        polkit)
+            command -v pkexec >/dev/null 2>&1 || _has_library 'libpolkit-gobject-1.so*'
+            return $?
+            ;;
+    esac
+    return 1
+}
+
+_dep_is_satisfied_by_local_module() {
+    local dep="${1,,}"
+    local dir=""
+    local f=""
+    local shortname=""
+
+    while IFS= read -r dir; do
+        [ -d "$dir" ] || continue
+        while IFS= read -r f; do
+            shortname=$(short_pkgname "$(basename "$f")")
+            if [ "${shortname,,}" = "$dep" ]; then
+                return 0
+            fi
+        done < <(find "$dir" -type f -name "*.${EXT}" -print 2>/dev/null)
+    done < <(_local_module_dirs | awk '!seen[$0]++')
+    return 1
+}
+
+_dep_is_satisfied() {
+    local dep="$1"
+
+    _dep_is_ignored "$dep" || _dep_is_satisfied_by_system "$dep" || _dep_is_satisfied_by_local_module "$dep"
+}
+
+_find_mounted_by_pkgname() {
+    local query="$1"
+    local mounted name short matches=""
+
+    command -v "$PFSINFO_BIN" >/dev/null 2>&1 || return 1
+    mounted=$("$PFSINFO_BIN" --machine --mount 2>/dev/null) || return 1
+    [ -n "$mounted" ] || return 1
+
+    while IFS=$'\t' read -r name _; do
+        [ -n "$name" ] || continue
+        short=$(short_pkgname "$name")
+        if [ "$name" = "$query" ] || [ "$short" = "$query" ] || [[ "$name" == "$query"-* ]]; then
+            case " $matches " in
+                *" $name "*) ;;
+                *) matches="${matches}${matches:+ }${name}" ;;
+            esac
+        fi
+    done <<< "$mounted"
+
+    [ -n "$matches" ] || return 1
+
+    local count
+    count=$(echo "$matches" | wc -w)
+    if [ "$count" -gt 1 ]; then
+        print_err "Неоднозначное имя '$query' соответствует: $matches"
+        return 2
+    fi
+
+    printf '%s' "$matches"
+    return 0
+}
+
+_resolve_source_path() {
+    local mount_target="$1"
+    local source="" backing=""
+
+    [ -n "$mount_target" ] || { printf '%s' "$mount_target" ; return ; }
+
+    source=$(awk -v t="$mount_target" '$2 == t {print $1; exit}' "${MODMAN_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null)
+
+    if [ -z "$source" ]; then
+        printf '%s' "$mount_target"
+        return
+    fi
+
+    case "$source" in
+        /dev/loop*)
+            if command -v losetup >/dev/null 2>&1; then
+                backing=$(losetup "$source" 2>/dev/null \
+                    | sed 's| (deleted)||g' \
+                    | sed -n 's|^[^(]*(\(.*\))$|\1|p')
+            fi
+            if [ -n "$backing" ]; then
+                printf '%s' "$backing"
+            else
+                printf '%s' "$source"
+            fi
+            ;;
+        *)
+            printf '%s' "$source"
+            ;;
+    esac
+}
+
+_normalize_module_key() {
+    local value="$1"
+
+    value="$(basename "$value")"
+    value="${value#.}"
+    value="${value%.pfs}"
+    printf '%s' "$value"
+}
+
+_aufs_branch_map() {
+    local aufs_prefix=""
+    local aufs_dir=""
+    local br=""
+    local n=""
+    local line=""
+    local branch_bundle=""
+    local key=""
+
+    aufs_prefix=$(grep ' / aufs' "$MODMAN_PROC_MOUNTS" | cut -f2 -d= | tr ',' ' ' | cut -f1 -d' ')
+    [ -n "$aufs_prefix" ] || return 1
+
+    aufs_dir="$MODMAN_AUFS_SYS_ROOT/si_${aufs_prefix}"
+    [ -d "$aufs_dir" ] || return 1
+
+    for br in "$aufs_dir"/br[0-9]*; do
+        [ -f "$br" ] || continue
+        n=$(basename "$br" | sed 's/^br//')
+        read -r line < "$br"
+        [ -n "$line" ] || continue
+        branch_bundle="${line%%=*}"
+        key="$(_normalize_module_key "$branch_bundle")"
+        printf '%s\t%s\t%s\n' "$n" "$branch_bundle" "$key"
+    done
+}
+
+_parse_machine_line() {
+    local line="$1"
+    local name=""
+    local layer=""
+    local path=""
+    local desc=""
+    local category=""
+    local repo_url=""
+    local field=""
+    local -a machine_fields=()
+
+    IFS=$'\t' read -r name layer path desc category _ <<< "$(_parse_cache_line "$line")"
+    IFS=$'\t' read -ra machine_fields <<< "$line"
+    for field in "${machine_fields[@]}"; do
+        case "$field" in
+            http://*|https://*)
+                repo_url="$field"
+                ;;
+        esac
+    done
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$layer" "$path" "$desc" "$category" "$repo_url"
+}
+
+_parse_cache_line() {
+    local line="$1"
+    local name=""
+    local field2=""
+    local field3=""
+    local field4=""
+    local field5=""
+    local field6=""
+    local layer=""
+    local path=""
+    local desc=""
+    local category=""
+    local version=""
+    local resolved_path=""
+    local sep=$'\t'
+
+    if [ -n "${IFS_SEP:-}" ]; then
+        sep="$IFS_SEP"
+    fi
+
+    IFS="$sep" read -r name field2 field3 field4 field5 field6 _ <<< "$line"
+
+    layer="$field2"
+    path="$field3"
+    desc="$field4"
+    category="$field5"
+    if [ -n "$field6" ]; then
+        version="$field6"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$layer" "$path" "$desc" "$category" "$version"
+}
+
+_search_cache_lines() {
+    local query="$1"
+    local sep=$'\t'
+
+    if [ -n "${IFS_SEP:-}" ]; then
+        sep="$IFS_SEP"
+    fi
+
+    awk -v q="$query" -v FS="$sep" '
+        BEGIN {
+            query = tolower(q)
+        }
+
+        function matches(value) {
+            if (query == "") {
+                return 1
+            }
+
+            return index(tolower(value), query) > 0
+        }
+
+        function row_category() {
+            if (NF >= 6) {
+                return $2
+            }
+
+            return ""
+        }
+
+        function row_desc() {
+            if (NF >= 6) {
+                return $5
+            }
+
+            if (NF >= 4) {
+                return $4
+            }
+
+            return ""
+        }
+
+        {
+            if ($1 == "") {
+                next
+            }
+
+            if (matches($1)) {
+                if (!seen[$1]++) {
+                    print
+                }
+                next
+            }
+
+            if (query != "" && matches(row_category())) {
+                if (!seen[$1]++) {
+                    print
+                }
+                next
+            }
+
+            if (query != "" && matches(row_desc())) {
+                if (!seen[$1]++) {
+                    print
+                }
+                next
+            }
+        }
+    ' "$CACHE_FILE"
+}
+
+_search_machine_lines() {
+    local query="$1"
+    local sep=$'\t'
+
+    if [ -n "${IFS_SEP:-}" ]; then
+        sep="$IFS_SEP"
+    fi
+
+    awk -v q="$query" -v FS="$sep" -v OFS='\t' '
+        BEGIN {
+            query = tolower(q)
+        }
+
+        function matches(value) {
+            if (query == "") {
+                return 1
+            }
+
+            return index(tolower(value), query) > 0
+        }
+
+        function row_category() {
+            if (NF >= 6) {
+                return $2
+            }
+
+            return ""
+        }
+
+        function row_desc() {
+            if (NF >= 6) {
+                return $5
+            }
+
+            if (NF >= 4) {
+                return $4
+            }
+
+            return ""
+        }
+
+        function emit(    i, repo_url) {
+            if (seen[$1]++) {
+                return
+            }
+
+            repo_url = ""
+            for (i = NF; i >= 1; i--) {
+                if ($i ~ /^https?:\/\//) {
+                    repo_url = $i
+                    break
+                }
+            }
+
+            print $1, $2, $3, $4, $5, repo_url
+        }
+
+        {
+            if ($1 == "") {
+                next
+            }
+
+            if (matches($1)) {
+                emit()
+                next
+            }
+
+            if (query != "" && matches(row_category())) {
+                emit()
+                next
+            }
+
+            if (query != "" && matches(row_desc())) {
+                emit()
+                next
+            }
+        }
+    ' "$CACHE_FILE"
+}
+
+_search_human_lines() {
+    local query="$1"
+    local sep=$'\t'
+    local deps_file="${CACHE_DEP:-}"
+
+    if [ -n "${IFS_SEP:-}" ]; then
+        sep="$IFS_SEP"
+    fi
+    [ -f "$deps_file" ] || deps_file="/dev/null"
+
+    awk -v q="$query" -v FS="$sep" '
+        BEGIN {
+            query = tolower(q)
+        }
+
+        ARGIND == 1 {
+            pos = index($0, " : ")
+            if (pos > 0) {
+                deps[substr($0, 1, pos - 1)] = substr($0, pos + 3)
+            }
+            next
+        }
+
+        function matches(value) {
+            if (query == "") {
+                return 1
+            }
+
+            return index(tolower(value), query) > 0
+        }
+
+        function row_category() {
+            if (NF >= 6) {
+                return $2
+            }
+
+            return ""
+        }
+
+        function row_desc() {
+            if (NF >= 6) {
+                return $5
+            }
+
+            if (NF >= 4) {
+                return $4
+            }
+
+            return ""
+        }
+
+        function short_pkgname(name,    shortname) {
+            shortname = name
+            sub(/\.[^.]*$/, "", shortname)
+            sub(/(-[0-9].*|_any.*|_64.*|-sf[0-9]+.*|-au[0-9]+.*)/, "", shortname)
+            return shortname
+        }
+
+        function emit(    category, desc, dep_key) {
+            if (seen[$1]++) {
+                return
+            }
+
+            category = row_category()
+            desc = row_desc()
+            print "\033[36m" $1 "\033[0m (" $2 ", " $3 ")"
+            if (category != "") {
+                print "    Категория: " category
+            }
+            print "    " desc
+            dep_key = short_pkgname($1)
+            if (dep_key in deps && deps[dep_key] != "") {
+                print "    Зависимости: " deps[dep_key]
+            }
+            print ""
+        }
+
+        {
+            if ($1 == "") {
+                next
+            }
+
+            if (matches($1)) {
+                emit()
+                next
+            }
+
+            if (query != "" && matches(row_category())) {
+                emit()
+                next
+            }
+
+            if (query != "" && matches(row_desc())) {
+                emit()
+                next
+            }
+        }
+    ' "$deps_file" "$CACHE_FILE"
+}
+
+detect_initrd() {
+    local initrd=""
+
+    # Предпочтительный v5 контракт: pfs --detect-initrd
+    if ! command -v "$PFS_BIN" >/dev/null 2>&1; then
+        fatal_err "Команда $PFS_BIN не найдена."
+        return 1
+    fi
+
+    if ! initrd=$(_run_with_timeout 5 "$PFS_BIN" --detect-initrd 2>/dev/null); then
+        printf 'warn\tpfs_timeout\tpfs --detect-initrd timed out or failed\n' >&2
+        fatal_err "Не удалось выполнить pfs --detect-initrd."
+        return 1
+    fi
+
+    case "$initrd" in
+        rootaufs2|uird|livekit|porteus|unknown)
+            printf '%s\n' "$initrd"
+            ;;
+        *)
+            fatal_err "Команда pfs --detect-initrd вернула неизвестное значение: '$initrd'"
+            return 1
+            ;;
+    esac
+}
+
+detect_layering_mode() {
+    local layering_mode=""
+
+    # Предпочтительный v5 контракт: pfs --layering-mode
+    if ! command -v "$PFS_BIN" >/dev/null 2>&1; then
+        fatal_err "Команда $PFS_BIN не найдена."
+        return 1
+    fi
+
+    if ! layering_mode=$(_run_with_timeout 5 "$PFS_BIN" --layering-mode 2>/dev/null); then
+        printf 'warn\tpfs_timeout\tpfs --layering-mode timed out or failed\n' >&2
+        fatal_err "Не удалось выполнить pfs --layering-mode."
+        return 1
+    fi
+
+    case "$layering_mode" in
+        aufs|overlay)
+            printf '%s\n' "$layering_mode"
+            ;;
+        *)
+            fatal_err "Команда pfs --layering-mode вернула неизвестное значение: '$layering_mode'"
+            return 1
+            ;;
+    esac
+}
+
+_read_initvars_value() {
+    local key="$1"
+
+    [ -f "$MODMAN_INITVARS_FILE" ] || return 1
+    awk -F= -v target="$key" '$1 == target { print substr($0, index($0, "=") + 1); exit }' "$MODMAN_INITVARS_FILE"
+}
+
+_has_layer_state() {
+    local name="$1"
+    local bundle="$2"
+    local bundle_name=""
+
+    [ -d "$PFS_LAYER_STATE_DIR" ] || return 1
+
+    bundle_name=$(basename "$bundle")
+    if [ -n "$bundle_name" ] && [ -f "$PFS_LAYER_STATE_DIR/$bundle_name.layer" ]; then
+        return 0
+    fi
+
+    [ -n "$name" ] && [ -f "$PFS_LAYER_STATE_DIR/$name.layer" ]
+}
+
+_is_base_module() {
+    local name="$1"
+    local bundle="$2"
+    local initrd="$3"
+    local layering_mode="$4"
+    local initrd_prefix="${AUFS_INITRD_PREFIX%/}"
+    local sysmnt=""
+
+    case "$layering_mode" in
+        overlay)
+            _has_layer_state "$name" "$bundle" && return 1
+            return 0
+            ;;
+    esac
+
+    case "$initrd" in
+        rootaufs2)
+            [[ "$bundle" == "$initrd_prefix"* ]]
+            ;;
+        uird)
+            sysmnt=$(_read_initvars_value "SYSMNT")
+            [ -n "$sysmnt" ] || sysmnt="/memory"
+            [[ "$bundle" == "${sysmnt%/}/bundles/"* || "$bundle" == "${sysmnt%/}/layer-base/"* ]]
+            ;;
+        livekit|porteus)
+            sysmnt=$(_read_initvars_value "SYSMNT")
+            [ -n "$sysmnt" ] || sysmnt="/mnt/live/memory"
+            [[ "$bundle" == "${sysmnt%/}/bundles/"* || "$bundle" == "${sysmnt%/}/layer-base/"* ]]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+_list_loaded_from_pfsinfo() {
+    local filter="$1"
+    local initrd="$2"
+    local layering_mode="$3"
+    local pfsinfo_output=""
+    local name=""
+    local layer=""
+    local path=""
+    local desc=""
+    local category=""
+    local version=""
+    local resolved_path=""
+    local module_key=""
+    local path_key=""
+    local mapped_layer=""
+    local branch_n=""
+    local branch_path=""
+    local branch_key=""
+    local mode=""
+    local in_ram=""
+    local -A branch_by_path=()
+    local -A branch_by_key=()
+    _init_loaded_caches
+    export _PROC_MOUNTS_CACHE
+
+    command -v "$PFSINFO_BIN" >/dev/null 2>&1 || return 1
+    if ! pfsinfo_output=$(_run_with_timeout 5 "$PFSINFO_BIN" --machine --mount 2>/dev/null); then
+        _emit_deferred_warn "pfsinfo_timeout" "pfsinfo --machine --mount timed out or failed"
+        return 1
+    fi
+    if [ "$layering_mode" = "aufs" ]; then
+        while IFS=$'\t' read -r branch_n branch_path branch_key _; do
+            [ -n "$branch_n" ] || continue
+            [ -n "$branch_path" ] && branch_by_path["$branch_path"]="$branch_n"
+            [ -n "$branch_key" ] && branch_by_key["$branch_key"]="$branch_n"
+        done <<< "$(_aufs_branch_map 2>/dev/null || true)"
+    fi
+
+    while IFS=$'\t' read -r name layer path desc category version _; do
+        [ -n "$name" ] || continue
+
+        case "$filter" in
+            before)
+                _is_base_module "$name" "$path" "$initrd" "$layering_mode" || continue
+                ;;
+            after)
+                _is_base_module "$name" "$path" "$initrd" "$layering_mode" && continue
+                ;;
+        esac
+
+        resolved_path="$(_resolve_source_path "$path")"
+        if [ "$layering_mode" = "aufs" ] && [[ ! "$layer" =~ [0-9] ]]; then
+            module_key="$(_normalize_module_key "$name")"
+            path_key="$(_normalize_module_key "$resolved_path")"
+            mapped_layer=""
+            [ -n "$path" ] && mapped_layer="${branch_by_path[$path]:-}"
+            [ -z "$mapped_layer" ] && [ -n "$resolved_path" ] && mapped_layer="${branch_by_path[$resolved_path]:-}"
+            [ -z "$mapped_layer" ] && [ -n "$path_key" ] && mapped_layer="${branch_by_key[$path_key]:-}"
+            [ -z "$mapped_layer" ] && [ -n "$module_key" ] && mapped_layer="${branch_by_key[$module_key]:-}"
+            [ -n "$mapped_layer" ] && layer="$mapped_layer"
+        fi
+        in_ram=$(_derive_in_ram_for_path "$resolved_path")
+        printf '%s\t%s\t%s\t%s\t\t%s\n' "$name" "$layer" "$resolved_path" "$desc" "$in_ram"
+    done <<< "$pfsinfo_output"
+}
+
+_list_loaded_from_aufs() {
+    local filter="$1"
+    local n=""
+    local bundle=""
+    local source=""
+    local output_path=""
+    local name=""
+    local is_runtime_mount=0
+    local layer=""
+    local back_file=""
+    local branch_key=""
+    local source_dir=""
+    local mode=""
+    local in_ram=""
+    local runtime_mount_prefix=""
+    local runtime_mount_path=""
+    local -A layer_by_source=()
+    local -A layer_by_source_dir=()
+    local -A layer_by_bundle=()
+    local -A source_by_bundle=()
+    _init_loaded_caches
+    export _PROC_MOUNTS_CACHE
+    _require_runtime_mount_prefix 2>/dev/null || true
+    runtime_mount_prefix="${RUNTIME_MOUNT_PREFIX:-/mnt/.}"
+
+    if [ "$filter" = "before" ]; then
+        while IFS=$'\t' read -r n bundle _; do
+            [ -n "$n" ] || continue
+            [[ "$n" == "00" ]] && continue
+            [ -n "$bundle" ] || continue
+            [[ "$bundle" == "${runtime_mount_prefix}"* ]] && continue
+            [[ "$bundle" == *.$EXT ]] || continue
+
+            name=$(basename "$bundle")
+            name="${name#.}"
+            [[ "$name" == *.$EXT ]] || name="${name}.${EXT}"
+            # Runtime-loaded modules may also have a /run/bundles/.X.pfs
+            # mountpoint in pfs-utils v5, but they additionally expose a live
+            # /mnt/.X.pfs mountpoint. Boot-loaded modules (like first.pfs) do
+            # not. Skip anything that has the live mountpoint here so it only
+            # appears in --list-loaded-after.
+            runtime_mount_path="${runtime_mount_prefix}${name}"
+            if mountpoint -q "$runtime_mount_path" 2>/dev/null; then
+                continue
+            fi
+            in_ram=$(_derive_in_ram_for_path "$bundle")
+            printf '%s\t%s\t%s\t-\t\t%s\n' "$name" "$n" "$bundle" "$in_ram"
+        done < <(_aufs_branch_map 2>/dev/null || true)
+        return 0
+    fi
+
+    while IFS=$'\t' read -r n bundle _; do
+        [ -n "$n" ] || continue
+        [ -n "$bundle" ] || continue
+
+        layer="$n"
+        layer_by_bundle["$bundle"]="$layer"
+        source=""
+        if [[ "$bundle" == *.$EXT ]]; then
+            source="$(_resolve_source_path "$bundle")"
+            if [ -z "$source" ]; then
+                source="$bundle"
+            fi
+            [ -n "$source" ] && layer_by_source["$source"]="$layer"
+        fi
+        if [ -n "$source" ]; then
+            source_by_bundle["$bundle"]="$source"
+            source_dir=$(dirname "$source")
+            [ -n "$source_dir" ] && layer_by_source_dir["$source_dir"]="$layer"
+        fi
+
+        [[ "$n" == "00" ]] && continue
+
+        is_runtime_mount=0
+        [[ "$bundle" == "${runtime_mount_prefix}"* ]] && is_runtime_mount=1
+
+        output_path="$source"
+        if [[ "$output_path" != *.$EXT ]]; then
+            output_path="$bundle"
+        fi
+        [[ "$output_path" == *.$EXT || "$bundle" == "${runtime_mount_prefix}"* ]] || continue
+
+        if [ "$is_runtime_mount" -eq 1 ]; then
+            name=$(basename "$bundle")
+        else
+            name=$(basename "$output_path")
+        fi
+        name="${name#.}"
+        [[ "$name" == *.$EXT ]] || name="${name}.${EXT}"
+
+        case "$filter" in
+            after)
+                [ "$is_runtime_mount" -eq 0 ] || continue
+                runtime_mount_path="${runtime_mount_prefix}${name}"
+                mountpoint -q "$runtime_mount_path" 2>/dev/null || continue
+                ;;
+            all)
+                [ "$is_runtime_mount" -eq 0 ] || continue
+                ;;
+            before)
+                [ "$is_runtime_mount" -eq 0 ] || continue
+                ;;
+        esac
+
+        in_ram=$(_derive_in_ram_for_path "$output_path")
+        printf '%s\t%s\t%s\t-\t\t%s\n' "$name" "$layer" "$output_path" "$in_ram"
+    done < <(_aufs_branch_map 2>/dev/null || true)
+
+    case "$filter" in
+        before)
+            return 0
+            ;;
+    esac
+
+    if command -v losetup >/dev/null 2>&1; then
+        while IFS= read -r back_file; do
+            # losetup may append " (deleted)" annotation for unlinked backings;
+            # the awk pipeline below splits on first ')' which leaves trailing
+            # whitespace before that annotation. Trim it so the *.$EXT glob
+            # below matches.
+            back_file="${back_file%% (deleted)}"
+            back_file="${back_file%"${back_file##*[![:space:]]}"}"
+            [ -n "$back_file" ] || continue
+            [[ "$back_file" == *.$EXT ]] || continue
+
+            name=$(basename "$back_file")
+            if [ "$filter" = "after" ]; then
+                # Hot-loaded modules expose a live mountpoint at /mnt/.X.pfs.
+                # Boot-loaded bundles do not. Check the real mountpoint, not
+                # mere directory existence, to avoid stale-dir false positives.
+                runtime_mount_path="${runtime_mount_prefix}${name}"
+                if ! mountpoint -q "$runtime_mount_path" 2>/dev/null; then
+                    continue
+                fi
+            fi
+            branch_key="${runtime_mount_prefix}${name}"
+            source_dir=$(dirname "$back_file")
+            layer="${layer_by_source[$back_file]:-${layer_by_bundle[$branch_key]:-${layer_by_source_dir[$source_dir]:--}}}"
+            output_path="${source_by_bundle[$branch_key]:-$back_file}"
+            in_ram=$(_derive_in_ram_for_path "$output_path")
+            printf '%s\t%s\t%s\t-\t\t%s\n' "$name" "$layer" "$output_path" "$in_ram"
+        done < <(losetup -a 2>/dev/null \
+            | awk -F'(' '! /.squashfs\)/ {print $2}' \
+            | awk -F')' '{print $1}')
+    fi
+
+    if [ "$filter" = "all" ]; then
+        return 0
+    fi
+}
+
+# ==========================================
+# ГЕНЕРАЦИЯ ИНДЕКСОВ (ДЛЯ МЕЙНТЕЙНЕРА)
+# ==========================================
+
+make_index() {
+    local target_dir="${1:-.}"
+    if [ ! -d "$target_dir" ]; then
+        print_err "Директория $target_dir не существует!"
+        exit 1
+    fi
+    
+    local index_file="$target_dir/000-index.txt"
+    local tmp_index="$target_dir/000-index.txt.tmp"
+    : > "$tmp_index"
+    
+    declare -A cache_size cache_date cache_desc
+    if [ -f "$index_file" ]; then
+        print_msg "Найден старый индекс. Создание бэкапа..."
+        cp "$index_file" "${index_file}.bak"
+        while IFS=$'\t' read -r name size date desc deps; do
+            cache_size["$name"]="$size"
+            cache_date["$name"]="$date"
+            cache_desc["$name"]="$desc"
+        done < "$index_file"
+    fi
+    
+    local files=("$target_dir"/*."${EXT}")
+    local total=${#files[@]}
+    local count=0
+    
+    print_msg "Генерация главного индекса ($total файлов)..."
+    
+    for pfs in "${files[@]}"; do
+        [ -e "$pfs" ] || continue
+        ((count++))
+        local filename
+        local size
+        local date
+        filename=$(basename "$pfs")
+        size=$(du -h "$pfs" | cut -f1)
+        date=$(date -r "$pfs" "+%Y-%m-%d")
+        
+        printf "[%3d/%3d] %-40s " "$count" "$total" "${filename:0:40}"
+        
+        local desc=""
+        if [ "${cache_size[$filename]}" == "$size" ] && [ "${cache_date[$filename]}" == "$date" ] && [ -n "${cache_desc[$filename]}" ]; then
+            desc="${cache_desc[$filename]}"
+            printf "\e[32m[КЭШ]\e[0m\n"
+        else
+            local pkgname
+            pkgname=$(clean_pkgname "$filename")
+            if command -v pacman >/dev/null 2>&1; then
+                # Используем LC_ALL=C для получения Description на английском
+                desc=$(LC_ALL=C pacman -Si "$pkgname" 2>/dev/null | grep -i "^Description" | cut -d':' -f2- | sed 's/^ *//')
+                
+                if [ -z "$desc" ]; then
+                    # Фолбэк: широкий поиск (если точное имя не найдено)
+                    desc=$(LC_ALL=C pacman -Ss "$pkgname" 2>/dev/null | grep -A 1 "^.*/$pkgname " | tail -n 1 | sed 's/^ *//')
+                fi
+                
+                if [ -z "$desc" ] && command -v curl >/dev/null 2>&1; then
+                    # Фолбэк AUR: Прямой запрос к API Arch User Repository
+                    desc=$(curl -s "https://aur.archlinux.org/rpc/?v=5&type=search&arg=$pkgname" | grep -o '"Description":"[^"]*"' | head -n1 | cut -d'"' -f4)
+                fi
+            elif command -v apt-cache >/dev/null 2>&1; then
+                desc=$(LC_ALL=C apt-cache show "$pkgname" 2>/dev/null | grep -i "^Description:" | head -n1 | cut -d':' -f2- | sed 's/^ *//')
+                if [ -z "$desc" ]; then
+                    # Фолбэк для APT: поиск по подстроке
+                    desc=$(LC_ALL=C apt-cache search "^$pkgname" 2>/dev/null | head -n1 | grep -oE ' - .*' | sed 's/^ - //')
+                fi
+            fi
+            
+            [ -z "$desc" ] && desc="Нет описания"
+            printf "\e[33m[ОБНОВЛЕН]\e[0m (%s)\n" "$pkgname"
+        fi
+        
+        echo -e "${filename}\t${size}\t${date}\t${desc}\t-" >> "$tmp_index"
+    done
+    mv "$tmp_index" "$index_file"
+    print_ok "Индекс $index_file успешно обновлен."
+}
+
+make_deps() {
+    local target_dir="${1:-.}"
+    if [ ! -d "$target_dir" ]; then
+        print_err "Директория $target_dir не существует!"
+        exit 1
+    fi
+    
+    local deps_file="$target_dir/000-dependencies.txt"
+    local tmp_deps="$target_dir/000-dependencies.txt.tmp"
+    : > "$tmp_deps"
+    
+    declare -A cache_deps
+    if [ -f "$deps_file" ]; then
+        print_msg "Найден старый файл зависимостей. Создание бэкапа..."
+        cp "$deps_file" "${deps_file}.bak"
+        local deps_file_mtime
+        deps_file_mtime=$(stat -c %Y "$deps_file")
+        while read -r line; do
+            if [[ "$line" =~ ^(.*)\ :\ (.*)$ ]]; then
+                local f="${BASH_REMATCH[1]}"
+                f="${f// /}"
+                cache_deps["$f"]="${BASH_REMATCH[2]}"
+            fi
+        done < "$deps_file"
+    else
+        local deps_file_mtime=0
+    fi
+    
+    local files=("$target_dir"/*."${EXT}")
+    local total=${#files[@]}
+    local count=0
+    
+    print_msg "Извлечение зависимостей ($total файлов)..."
+    
+    for pfs in "${files[@]}"; do
+        [ -e "$pfs" ] || continue
+        ((count++))
+        local filename
+        local shortname
+        local file_mtime
+        filename=$(basename "$pfs")
+        shortname=$(short_pkgname "$filename")
+        file_mtime=$(stat -c %Y "$pfs")
+        
+        printf "[%3d/%3d] %-40s " "$count" "$total" "${shortname:0:40}"
+        
+        local deps=""
+        if [ "$file_mtime" -lt "$deps_file_mtime" ]; then
+            deps="${cache_deps[$shortname]}"
+            if [ -n "$deps" ]; then
+                printf "\e[32m[КЭШ]\e[0m (%s)\n" "$deps"
+            else
+                printf "\e[32m[КЭШ]\e[0m (пусто)\n"
+            fi
+        else
+            if command -v unsquashfs >/dev/null 2>&1; then
+                # Строго извлекаем только имена пакетов после <pkg>-dep, игнорируя кавычки, команды и bash-шум
+                deps=$(unsquashfs -cat "$pfs" start.sh 2>/dev/null | grep -oE '[a-zA-Z0-9_-]+-dep [ A-Za-z0-9_-]+' | sed 's/^[a-zA-Z0-9_-]*-dep //')
+            fi
+            if [ -n "$deps" ]; then
+                printf "\e[33m[НАЙДЕНЫ]\e[0m (%s)\n" "$deps"
+            else
+                printf "\e[90m[ПУСТО]\e[0m\n"
+            fi
+        fi
+        
+        if [ -n "$deps" ]; then
+            echo "$shortname : $deps" >> "$tmp_deps"
+        fi
+    done
+    mv "$tmp_deps" "$deps_file"
+    print_ok "Файл зависимостей $deps_file успешно обновлен."
+}
+
+# ==========================================
+# ОСНОВНЫЕ ФУНКЦИИ ПАКЕТНОГО МЕНЕДЖЕРА
+# ==========================================
+
+# Iterate active (non-commented) repository URLs in REPO_URLS order.
+# Falls back to legacy single REPO_URL if REPO_URLS is empty.
+iter_repos() {
+    if [[ ${#REPO_URLS[@]} -gt 0 ]]; then
+        for url in "${REPO_URLS[@]}"; do
+            [[ "$url" =~ ^#.* ]] && continue
+            [[ -n "$url" ]] && printf '%s\n' "$url"
+        done
+    elif [ -n "${REPO_URL:-}" ]; then
+        printf '%s\n' "$REPO_URL"
+    fi
+}
+
+# Backward-compat shim: first active URL only.
+get_first_repo() {
+    iter_repos | head -n 1
+}
+
+sync_db() {
+    local repo_url merged_index merged_deps
+    local any_index_ok=0 any_deps_ok=0
+    local any_index_failed=0
+    local repo_count=0
+
+    merged_index="$(mktemp)"
+    merged_deps="$(mktemp)"
+
+    while IFS= read -r repo_url; do
+        [ -n "$repo_url" ] || continue
+        repo_count=$((repo_count + 1))
+        local tmp_index tmp_deps
+        tmp_index="$(mktemp)"
+        tmp_deps="$(mktemp)"
+
+        print_msg "Скачивание 000-index.txt с $repo_url..."
+        if wget -qO "$tmp_index" "$repo_url/000-index.txt" && [ -s "$tmp_index" ]; then
+            awk -v url="$repo_url" -v OFS='\t' 'NF > 0 {print $0, url}' "$tmp_index" >> "$merged_index"
+            any_index_ok=1
+            print_ok "  индекс: $(wc -l < "$tmp_index") записей"
+        else
+            print_err "  не удалось получить 000-index.txt"
+            any_index_failed=1
+        fi
+
+        print_msg "Скачивание 000-dependencies.txt с $repo_url..."
+        if wget -qO "$tmp_deps" "$repo_url/000-dependencies.txt" && [ -s "$tmp_deps" ]; then
+            cat "$tmp_deps" >> "$merged_deps"
+            any_deps_ok=1
+            print_ok "  зависимости: $(wc -l < "$tmp_deps") записей"
+        else
+            print_msg "  000-dependencies.txt отсутствует (пропущен)"
+        fi
+
+        rm -f "$tmp_index" "$tmp_deps"
+    done < <(iter_repos)
+
+    if [ "$repo_count" -eq 0 ]; then
+        print_err "REPO_URLS пуст, REPO_URL не задан — нечего синхронизировать."
+        rm -f "$merged_index" "$merged_deps"
+        exit 1
+    fi
+
+    if [ "$any_index_ok" -eq 0 ]; then
+        rm -f "$merged_index" "$merged_deps"
+        print_err "Не удалось получить 000-index.txt ни из одного репозитория."
+        exit 1
+    fi
+
+    # Dedupe by filename (column 1, tab-separated). First occurrence wins:
+    # earlier repos in REPO_URLS take precedence over later ones.
+    awk -F'\t' '!seen[$1]++' "$merged_index" > "$CACHE_FILE"
+    print_ok "Главный индекс: $(wc -l < "$CACHE_FILE") уникальных записей из $repo_count репо ($(wc -l < "$merged_index") всего)"
+
+    if [ "$any_deps_ok" -eq 1 ]; then
+        # Dedupe by shortname (everything before " : "). First occurrence wins.
+        awk -F' : ' '!seen[$1]++' "$merged_deps" > "$CACHE_DEP"
+        print_ok "Индекс зависимостей: $(wc -l < "$CACHE_DEP") уникальных записей"
+    else
+        : > "$CACHE_DEP"
+        print_msg "Индекс зависимостей пуст — ни в одном репо нет 000-dependencies.txt."
+    fi
+
+    rm -f "$merged_index" "$merged_deps"
+
+    if [ "$any_index_failed" -eq 1 ]; then
+        print_err "Синхронизация завершена с ошибками: один или несколько репозиториев не отдали 000-index.txt."
+        return 1
+    fi
+}
+
+download_module() {
+    local name="$1"
+
+    _validate_name "$name" || exit 2
+    _require_download_dir
+
+    local line
+    line=$(_find_cache_line_by_shortname "$name" || true)
+
+    if [ -z "$line" ] && [ "${MODMAN_EXACT_NAME:-0}" -ne 1 ]; then
+        line=$(_find_cache_line_by_filename_match "$name" prefix || true)
+    fi
+
+    if [ -z "$line" ] && [ "${MODMAN_EXACT_NAME:-0}" -ne 1 ]; then
+        line=$(_find_cache_line_by_filename_match "$name" contains || true)
+    fi
+
+    if [ -z "$line" ]; then
+        print_err "Модуль '$name' не найден в базе."
+        exit 1
+    fi
+
+    IFS=$'\t' read -r name _ <<< "$line"
+    download_file "$name" || {
+        print_err "Не удалось скачать $name"
+        exit 1
+    }
+    print_ok "Модуль $name скачан."
+}
+
+search_module() {
+    local query="$1"
+    if [ ! -f "$CACHE_FILE" ]; then
+        print_err "Кэш пуст. Запустите $0 -Sy сначала."
+        exit 1
+    fi
+    
+    if [ "$MACHINE_MODE" -eq 1 ]; then
+        _search_machine_lines "$query"
+    else
+        _search_human_lines "$query"
+    fi
+}
+
+list_local() {
+    local dirs=""
+    local f=""
+    local abs_path=""
+    local name=""
+    local size=""
+    local date=""
+
+    _require_download_dir
+    dirs=$(_local_module_dirs | awk '!seen[$0]++')
+    if [ "$MACHINE_MODE" -eq 1 ]; then
+        while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            abs_path=$(realpath "$f" 2>/dev/null) || continue
+            name=$(basename "$abs_path")
+            size=$(du -h "$abs_path" | cut -f1)
+            date=$(date -r "$abs_path" "+%Y-%m-%d")
+            echo -e "${name}\t${size}\t${date}\t${abs_path}"
+        done < <(
+            while IFS= read -r dir; do
+                [ -d "$dir" ] || continue
+                find "$dir" -type f -name "*.${EXT}" -print 2>/dev/null
+            done <<< "$dirs" | sort -u
+        )
+    else
+        local found=0
+        while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            abs_path=$(realpath "$f" 2>/dev/null) || continue
+            ls -lh "$abs_path"
+            found=1
+        done < <(
+            while IFS= read -r dir; do
+                [ -d "$dir" ] || continue
+                find "$dir" -type f -name "*.${EXT}" -print 2>/dev/null
+            done <<< "$dirs" | sort -u
+        )
+        [ "$found" -eq 1 ] || print_msg "Нет скачанных файлов."
+    fi
+}
+
+list_loaded() {
+    local filter="${1:-all}"
+    local initrd=""
+    local layering_mode=""
+
+    if grep -q ' / aufs' "$MODMAN_PROC_MOUNTS" 2>/dev/null; then
+        _list_loaded_from_aufs "$filter" "" "" \
+                | awk -F'\t' '!seen[$1 FS $3]++'
+        return "${PIPESTATUS[0]}"
+    fi
+
+    initrd=$(detect_initrd) || return 1
+    layering_mode=$(detect_layering_mode) || return 1
+
+    if [ "$filter" != "all" ]; then
+        if [ "$initrd" = "unknown" ]; then
+            fatal_err "Не удалось определить initrd через pfs --detect-initrd; фильтр '$filter' недоступен."
+            return 1
+        fi
+        _require_aufs_initrd_prefix
+    fi
+
+    if [ "$layering_mode" = "overlay" ]; then
+        if _list_loaded_from_pfsinfo "$filter" "$initrd" "$layering_mode" \
+                | awk -F'\t' '!seen[$1 FS $3]++'; then
+            return "${PIPESTATUS[0]}"
+        fi
+        fatal_err "Список загруженных overlay-модулей требует pfsinfo --machine --mount."
+        return 1
+    fi
+
+    _list_loaded_from_aufs "$filter" "$initrd" "$layering_mode" \
+            | awk -F'\t' '!seen[$1 FS $3]++'
+}
+
+download_file() {
+    local filename="$1"
+    local target="$DOWNLOAD_DIR/$filename"
+    if [ -f "$target" ]; then
+        print_msg "Файл $filename уже есть локально."
+        return 0
+    fi
+
+    local repo_url
+    local progress_file="${MODMAN_PROGRESS_FILE:-}"
+    print_msg "Скачивание $filename..."
+    while IFS= read -r repo_url; do
+        [ -n "$repo_url" ] || continue
+        if [ -n "$progress_file" ]; then
+            # fs.protected_regular>=1 (Arch/Debian default) blocks open(O_CREAT|
+            # O_TRUNC) on a regular file in a sticky world-writable dir like
+            # /tmp when caller != file owner — even under root. The GUI creates
+            # the sink as the unprivileged user before pkexec; we unlink first
+            # so subsequent printf creates a fresh root-owned file in-place.
+            rm -f -- "$progress_file" 2>/dev/null
+            printf 'name=%s\nstage=download\npct=0\n' "$filename" > "$progress_file"
+            wget --progress=dot:binary -O "$target" "$repo_url/$filename" 2>&1 | \
+                awk -v PF="$progress_file" -v NM="$filename" '
+                    /[0-9]+%/ {
+                        if (match($0, /[0-9]+%/)) {
+                            pct = substr($0, RSTART, RLENGTH - 1)
+                            printf "name=%s\nstage=download\npct=%s\n", NM, pct > PF
+                            close(PF)
+                        }
+                    }
+                '
+            local ec=${PIPESTATUS[0]}
+            [ "$ec" -eq 0 ] && return 0
+        elif [ "$MACHINE_MODE" -eq 1 ]; then
+            wget -q -O "$target" "$repo_url/$filename" 2>/dev/null && return 0
+        else
+            wget --show-progress -O "$target" "$repo_url/$filename" 2>&1 && return 0
+        fi
+        rm -f "$target"
+    done < <(iter_repos)
+    print_err "Не удалось скачать $filename ни из одного репозитория."
+    return 1
+}
+
+_install_local() {
+    local pfs_path="$1"
+    local abs_path basename shortname
+
+    abs_path=$(realpath "$pfs_path" 2>/dev/null) || {
+        print_err "Не удалось разрешить путь: $pfs_path"
+        exit 1
+    }
+    [ -f "$abs_path" ] || {
+        print_err "Файл не существует: $abs_path"
+        exit 1
+    }
+
+    basename=$(basename "$abs_path")
+    shortname=$(short_pkgname "$basename")
+
+    if [ -f "$CACHE_DEP" ]; then
+        local deps
+        deps=$(grep "^$shortname :" "$CACHE_DEP" | cut -d':' -f2- | sed 's/^ *//')
+        if [ -n "$deps" ]; then
+            print_msg "Обнаружены зависимости для $basename: $deps"
+            for dep in $deps; do
+                _validate_name "$dep" || exit 2
+                if _dep_is_satisfied "$dep"; then
+                    print_msg "-> Зависимость '$dep' уже удовлетворена системой/локальными модулями"
+                    continue
+                fi
+                _resolve_dep_or_abort "$basename" "$dep"
+            done
+        fi
+    fi
+
+    print_msg "Подключение $basename..."
+    local load_rc
+    if [ -n "$_PARSED_LOAD_CMD" ]; then
+        # Custom command override: word-split the string into argv tokens.
+        # NB: paths with spaces inside the override aren't supported.
+        # shellcheck disable=SC2206
+        _LOAD_CMD_ARGV=($_PARSED_LOAD_CMD)  # intentional unquoted expansion
+        "${_LOAD_CMD_ARGV[@]}" "$abs_path"
+        load_rc=$?
+        if [ "$load_rc" -eq 0 ]; then
+            print_ok "Модуль $basename успешно подключен."
+            return 0
+        fi
+        print_err "Ошибка команды загрузки для $basename."
+        return "$load_rc"
+    elif command -v "$CMD_LOAD" >/dev/null 2>&1; then
+        "$CMD_LOAD" "${_PARSED_PFSLOAD_FLAGS[@]}" "$abs_path"
+        load_rc=$?
+        if [ "$load_rc" -eq 0 ]; then
+            print_ok "Модуль $basename успешно подключен."
+            return 0
+        fi
+        print_err "Ошибка $CMD_LOAD для $basename."
+        return "$load_rc"
+    fi
+    print_err "Команда $CMD_LOAD не найдена."
+    return 127
+}
+
+install_module() {
+    local name="$1"
+
+    # Local file install: arg looks like a path AND points to an existing
+    # .${EXT} file. Bypass cache lookup and use the file directly.
+    case "$name" in
+        */*|.*|"~"*)
+            if [ -f "$name" ] && [ "${name##*.}" = "${EXT}" ]; then
+                _install_local "$name"
+                return $?
+            fi
+            ;;
+    esac
+
+    _validate_name "$name" || exit 2
+    _require_download_dir
+    local line
+    line=$(_find_cache_line_by_shortname "$name" || true)
+
+    if [ -z "$line" ] && [ "${MODMAN_EXACT_NAME:-0}" -ne 1 ]; then
+        line=$(_find_cache_line_by_filename_match "$name" prefix || true)
+    fi
+
+    if [ -z "$line" ] && [ "${MODMAN_EXACT_NAME:-0}" -ne 1 ]; then
+        line=$(_find_cache_line_by_filename_match "$name" contains || true)
+    fi
+    
+    if [ -z "$line" ]; then
+        print_err "Модуль '$name' не найден в базе."
+        exit 1
+    fi
+    
+    IFS=$'\t' read -r name size date desc _ <<< "$line"
+    
+    local shortname
+    shortname=$(short_pkgname "$name")
+    local deps=""
+    if [ -f "$CACHE_DEP" ]; then
+        deps=$(grep "^$shortname :" "$CACHE_DEP" | cut -d':' -f2- | sed 's/^ *//')
+    fi
+    
+    if [ -n "$deps" ]; then
+        print_msg "Обнаружены зависимости для $name: $deps"
+        for dep in $deps; do
+            _validate_name "$dep" || exit 2
+            if _dep_is_satisfied "$dep"; then
+                print_msg "-> Зависимость '$dep' уже удовлетворена системой/локальными модулями"
+                continue
+            fi
+            _resolve_dep_or_abort "$name" "$dep"
+        done
+    fi
+    
+    if ! download_file "$name"; then
+        print_err "Не удалось скачать $name"
+        exit 1
+    fi
+    
+    print_msg "Подключение $name..."
+    local load_rc
+    if [ -n "$_PARSED_LOAD_CMD" ]; then
+        # Custom command override: word-split the string into argv tokens.
+        # NB: paths with spaces inside the override aren't supported.
+        # shellcheck disable=SC2206
+        _LOAD_CMD_ARGV=($_PARSED_LOAD_CMD)  # intentional unquoted expansion
+        "${_LOAD_CMD_ARGV[@]}" "$DOWNLOAD_DIR/$name"
+        load_rc=$?
+        if [ "$load_rc" -eq 0 ]; then
+            print_ok "Модуль $name успешно подключен."
+        else
+            print_err "Ошибка команды загрузки для $name."
+            exit "$load_rc"
+        fi
+    elif command -v "$CMD_LOAD" >/dev/null 2>&1; then
+        "$CMD_LOAD" "${_PARSED_PFSLOAD_FLAGS[@]}" "$DOWNLOAD_DIR/$name"
+        load_rc=$?
+        if [ "$load_rc" -eq 0 ]; then
+            print_ok "Модуль $name успешно подключен."
+        else
+            print_err "Ошибка pfsload для $name."
+            exit "$load_rc"
+        fi
+    else
+        print_err "Команда $CMD_LOAD не найдена."
+        exit 127
+    fi
+}
+
+remove_module() {
+    local pkg="$1"
+    _validate_name "$pkg" || exit 2
+
+    local resolved
+    if resolved=$(_find_mounted_by_pkgname "$pkg" 2>/dev/null); then
+        if [ -n "$resolved" ] && [ "$resolved" != "$pkg" ]; then
+            print_msg "Найден загруженный модуль: $resolved"
+            pkg="$resolved"
+        fi
+    fi
+
+    print_msg "Отключение $pkg..."
+    if command -v "$CMD_UNLOAD" >/dev/null 2>&1; then
+        "$CMD_UNLOAD" "$pkg"
+        local ret=$?
+        if [ $ret -eq 0 ]; then
+            print_ok "Модуль $pkg отключен."
+        else
+            print_err "Ошибка pfsunload для $pkg."
+        fi
+        return $ret
+    else
+        print_err "Команда $CMD_UNLOAD не найдена! (Эмуляция отключения)"
+        return 1
+    fi
+}
+
+remove_local() {
+    if [ $# -eq 0 ]; then
+        fatal_err "remove-local: не указаны модули для удаления"
+        return 7
+    fi
+
+    _require_download_dir
+
+    local had_invalid=0 had_mounted=0 had_other_fail=0
+
+    local mounted_list=""
+    if command -v "$PFSINFO_BIN" >/dev/null 2>&1; then
+        mounted_list=$("$PFSINFO_BIN" --machine --mount 2>/dev/null || true)
+    fi
+
+    for raw_name in "$@"; do
+        local name="${raw_name%."${EXT}"}"
+
+        if ! [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]*$ ]]; then
+            printf 'error\tinvalid_name\t%s\n' "$raw_name"
+            had_invalid=1
+            continue
+        fi
+
+        local target="${DOWNLOAD_DIR}/${name}.${EXT}"
+        if [ ! -e "$target" ]; then
+            printf 'error\tnot_found\t%s\t%s\n' "$name" "$target"
+            had_other_fail=1
+            continue
+        fi
+
+        local target_resolved
+        target_resolved=$(realpath -- "$target" 2>/dev/null || printf '%s' "$target")
+
+        local is_mounted=0
+        if [ -n "$mounted_list" ]; then
+            while IFS=$'\t' read -r _mname _mlayer mpath _rest; do
+                local mounted_source mounted_resolved
+                [ -n "$mpath" ] || continue
+
+                mounted_source=$(_resolve_source_path "$mpath")
+                mounted_resolved=$(realpath -- "$mounted_source" 2>/dev/null || printf '%s' "$mounted_source")
+
+                if [ "$mounted_resolved" = "$target_resolved" ]; then
+                    is_mounted=1
+                    break
+                fi
+            done <<< "$mounted_list"
+        fi
+
+        if [ "$is_mounted" -eq 1 ]; then
+            printf 'error\tmounted\t%s\n' "$name"
+            had_mounted=1
+            continue
+        fi
+
+        if rm -f -- "$target"; then
+            printf 'removed\t%s\t%s\n' "$name" "$target_resolved"
+        else
+            printf 'error\trm_failed\t%s\n' "$name"
+            had_other_fail=1
+        fi
+    done
+
+    if [ "$had_other_fail" -eq 1 ]; then
+        return 9
+    elif [ "$had_mounted" -eq 1 ]; then
+        return 8
+    elif [ "$had_invalid" -eq 1 ]; then
+        return 7
+    fi
+    return 0
+}
+
+_rootaufs2_cleanup_root() {
+    _rootaufs2_home_root
+}
+
+_old_file_is_allowed() {
+    local cleanup_root="$1"
+    local file_path="$2"
+
+    [ -n "$cleanup_root" ] || return 1
+    [ -n "$file_path" ] || return 1
+    [[ "$file_path" == *".${EXT}.old" ]] || return 1
+    case "$file_path" in
+        "$cleanup_root"/base/*|"$cleanup_root"/modules/*|"$cleanup_root"/optional/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+list_old_modules() {
+    local cleanup_root=""
+
+    cleanup_root=$(_rootaufs2_cleanup_root) || return 0
+    find "$cleanup_root/base" "$cleanup_root/modules" "$cleanup_root/optional" \
+        -type f -name "*.${EXT}.old" -print 2>/dev/null | sort
+}
+
+remove_old_modules() {
+    local cleanup_root=""
+    local file_path=""
+    local had_invalid=0 had_fail=0
+
+    if [ $# -eq 0 ]; then
+        fatal_err "remove-old: не указаны .${EXT}.old файлы для удаления"
+        return 7
+    fi
+
+    cleanup_root=$(_rootaufs2_cleanup_root) || {
+        fatal_err "remove-old: не удалось определить rootaufs2 каталог очистки"
+        return 9
+    }
+
+    for file_path in "$@"; do
+        if ! _old_file_is_allowed "$cleanup_root" "$file_path"; then
+            printf 'error\tinvalid_path\t%s\n' "$file_path"
+            had_invalid=1
+            continue
+        fi
+
+        if [ ! -e "$file_path" ]; then
+            printf 'error\tnot_found\t%s\n' "$file_path"
+            had_fail=1
+            continue
+        fi
+
+        if rm -f -- "$file_path"; then
+            printf 'removed\t%s\n' "$file_path"
+        else
+            printf 'error\trm_failed\t%s\n' "$file_path"
+            had_fail=1
+        fi
+    done
+
+    if [ "$had_fail" -eq 1 ]; then
+        return 9
+    elif [ "$had_invalid" -eq 1 ]; then
+        return 7
+    fi
+    return 0
+}
+
+list_module_deps() {
+    local name="$1"
+    local shortname
+
+    if [ -z "$name" ]; then
+        print_err "Не указано имя модуля"
+        return 1
+    fi
+
+    shortname=$(short_pkgname "$name")
+
+    if [ -z "$shortname" ]; then
+        print_err "Не удалось вычислить shortname для $name"
+        return 1
+    fi
+
+    if [ ! -f "$CACHE_DEP" ]; then
+        print_err "Файл зависимостей не найден: $CACHE_DEP"
+        return 1
+    fi
+
+    local deps
+    deps=$(grep -i "^$shortname :" "$CACHE_DEP" | head -n1 | cut -d':' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+    if [ -z "$deps" ]; then
+        return 0
+    fi
+
+    if [ "$MACHINE_MODE" -eq 1 ]; then
+        local d
+        for d in $deps; do
+            printf '%s\n' "$d"
+        done
+    else
+        printf '%s\n' "$deps"
+    fi
+}
+
+_file_info_squashfs_detail() {
+    local path="$1"
+    local output=""
+    local compression=""
+    local level=""
+    local line=""
+    local lower=""
+
+    command -v unsquashfs >/dev/null 2>&1 || return 1
+    output=$(unsquashfs -s "$path" 2>/dev/null) || return 1
+    printf '%s' "$output" | grep -qi 'squashfs' || return 1
+
+    while IFS= read -r line; do
+        line=${line//$'\t'/ }
+        lower=${line,,}
+        if [[ "$lower" == *compression*level* ]]; then
+            level="${line##*[Ll]evel}"
+            level="${level#:}"
+        elif [[ "$lower" == compression[[:space:]]algorithm:* ]]; then
+            compression="${line#*:}"
+        elif [[ "$lower" == compression:* ]]; then
+            compression="${line#*:}"
+        elif [[ "$lower" == compression[[:space:]]* ]]; then
+            compression="${line#*[Cc]ompression }"
+        fi
+        compression="${compression# }"
+        level="${level# }"
+    done <<< "$output"
+
+    if [ -n "$compression" ] && [ -n "$level" ]; then
+        printf 'squashfs %s %s\n' "$compression" "$level"
+    elif [ -n "$compression" ]; then
+        printf 'squashfs %s\n' "$compression"
+    else
+        printf 'squashfs\n'
+    fi
+}
+
+_file_info_squashfs_list() {
+    local path="$1"
+
+    command -v unsquashfs >/dev/null 2>&1 || return 1
+    unsquashfs -l -d "" "$path" 2>/dev/null | while IFS= read -r line; do
+        case "$line" in
+            *squashfs-root/*)
+                line=${line#*squashfs-root/}
+                printf '%s\n' "$line"
+                ;;
+            *)
+                printf '%s\n' "$line"
+                ;;
+        esac
+    done
+}
+
+_file_info_modules() {
+    local path="$1"
+    local list=""
+    local module=""
+    local pfs_mount_new="${PFSDIR_MOUNT_NEW:-/var/lib/pfs/mount}"
+    local pfs_mount_legacy="${PFSDIR_MOUNT_LEGACY:-/etc/packages/mount}"
+    local pfs_mount_new_rel="${pfs_mount_new#/}"
+    local pfs_mount_legacy_rel="${pfs_mount_legacy#/}"
+
+    list=$(_file_info_squashfs_list "$path") || return 1
+    while IFS= read -r module; do
+        case "$module" in
+            *"${pfs_mount_new}"/*/*/pfs.files|*"${pfs_mount_new_rel}"/*/*/pfs.files)
+                case "$module" in
+                    *"${pfs_mount_new}"/*/*/pfs.files)
+                        module=${module#*${pfs_mount_new}/}
+                        ;;
+                    *)
+                        module=${module#*${pfs_mount_new_rel}/}
+                        ;;
+                esac
+                module=${module%/pfs.files}
+                module=${module#*/}
+                ;;
+            *"${pfs_mount_legacy}"/*/pfs.files|*"${pfs_mount_legacy_rel}"/*/pfs.files)
+                case "$module" in
+                    *"${pfs_mount_legacy}"/*/pfs.files)
+                        module=${module#*${pfs_mount_legacy}/}
+                        ;;
+                    *)
+                        module=${module#*${pfs_mount_legacy_rel}/}
+                        ;;
+                esac
+                module=${module%/pfs.files}
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        [ -n "$module" ] && printf '%s\n' "$module"
+    done <<< "$list" | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
+_file_info_cache_deps_for_module() {
+    local module="$1"
+    local shortname=""
+    local deps=""
+
+    [ -f "$CACHE_DEP" ] || return 0
+    shortname=$(short_pkgname "$module")
+    [ -n "$shortname" ] || return 0
+    deps=$(grep -i "^$shortname :" "$CACHE_DEP" | head -n1 | cut -d':' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -n "$deps" ] || return 0
+    printf '%s\n' $deps
+}
+
+_file_info_dependencies_from_modules() {
+    local modules="$1"
+    local fallback_name="$2"
+    local module=""
+
+    if [ -n "$modules" ]; then
+        for module in $modules; do
+            _file_info_cache_deps_for_module "$module"
+        done
+    else
+        _file_info_cache_deps_for_module "$fallback_name"
+    fi | sed '/^[[:space:]]*$/d' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
+_file_info_erofs_detail() {
+    local path="$1"
+    local output=""
+    local compression=""
+    local line=""
+    local lower=""
+
+    command -v dump.erofs >/dev/null 2>&1 || return 1
+    output=$(dump.erofs "$path" 2>&1) || return 1
+    printf '%s' "$output" | grep -qi 'erofs' || return 1
+
+    while IFS= read -r line; do
+        line=${line//$'\t'/ }
+        lower=${line,,}
+        case "$lower" in
+            compression:*)
+                compression="${line#Compression:}"
+                compression="${compression#compression:}"
+                compression="${compression# }"
+                ;;
+            compression\ *)
+                compression="${line#Compression }"
+                compression="${compression#compression }"
+                ;;
+        esac
+        [ -n "$compression" ] && break
+    done <<< "$output"
+
+    if [ -n "$compression" ]; then
+        printf 'erofs %s\n' "$compression"
+    else
+        printf 'erofs\n'
+    fi
+}
+
+query_file_info() {
+    local path="$1"
+    local ext="${EXT:-pfs}"
+
+    if [ -z "$path" ]; then
+        if [ "$MACHINE_MODE" -eq 1 ]; then
+            printf 'error\t%s\n' "path required"
+        else
+            print_err "Usage: modman -Qp <path>"
+        fi
+        return 1
+    fi
+
+    if [ ! -f "$path" ]; then
+        if [ "$MACHINE_MODE" -eq 1 ]; then
+            printf 'error\t%s\n' "file not found: $path"
+        else
+            print_err "File not found: $path"
+        fi
+        return 1
+    fi
+
+    local realpath_val
+    realpath_val=$(realpath "$path" 2>/dev/null) || realpath_val="$path"
+
+    local basename_val
+    basename_val=$(basename "$realpath_val")
+
+    if [[ "$basename_val" != *."$ext" ]]; then
+        if [ "$MACHINE_MODE" -eq 1 ]; then
+            printf 'error\t%s\n' "not a .$ext file: $basename_val"
+        else
+            print_err "Not a .$ext file: $basename_val"
+        fi
+        return 1
+    fi
+
+    local name="${basename_val%.$ext}"
+
+    local format="unknown"
+    local format_detail=""
+    local modules=""
+    local dependencies=""
+    local modules_human=""
+    local dependencies_human=""
+    local magic
+    magic=$(dd if="$realpath_val" bs=4 count=1 2>/dev/null | od -A n -t x1 | tr -d ' \n') || true
+    case "$magic" in
+        73717368*) format="squashfs" ;;
+        45324f73*|e2ro*|4532*) format="erofs" ;;
+    esac
+
+    if format_detail=$(_file_info_squashfs_detail "$realpath_val" 2>/dev/null); then
+        format="squashfs"
+    elif format_detail=$(_file_info_erofs_detail "$realpath_val" 2>/dev/null); then
+        format="erofs"
+    else
+        format_detail=""
+    fi
+
+    format_detail=${format_detail//$'\t'/ }
+    format_detail=${format_detail//$'\n'/ }
+
+    modules=$(_file_info_modules "$realpath_val" 2>/dev/null || true)
+    dependencies=$(_file_info_dependencies_from_modules "$modules" "$name" 2>/dev/null || true)
+    modules=${modules//$'\t'/ }
+    dependencies=${dependencies//$'\t'/ }
+    modules=${modules//$'\n'/ }
+    dependencies=${dependencies//$'\n'/ }
+    modules_human=${modules// /$'\n'}
+    dependencies_human=${dependencies// /$'\n'}
+
+    local size
+    size=$(du -h "$realpath_val" 2>/dev/null | cut -f1)
+    [ -n "$size" ] || size="0"
+
+    local loaded_state="local"
+    if _find_mounted_by_pkgname "$name" >/dev/null 2>&1; then
+        loaded_state="loaded"
+    fi
+
+    if [ "$MACHINE_MODE" -eq 1 ]; then
+        printf 'file\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$realpath_val" "$name" "$format" "$loaded_state" "$size" "$format_detail" "$modules" "$dependencies"
+    else
+        print_msg "Файл:     $realpath_val"
+        print_msg "Имя:      $name"
+        print_msg "Формат:   $format"
+        [ -n "$format_detail" ] && print_msg "FS:       $format_detail"
+        print_msg "Размер:   $size"
+        print_msg "Состояние: $loaded_state"
+        if [ -n "$modules_human" ]; then
+            print_msg "Модули:"
+            while IFS= read -r module; do
+                [ -n "$module" ] && print_msg "  $module"
+            done <<< "$modules_human"
+        else
+            print_msg "Модули:   -----"
+        fi
+        if [ -n "$dependencies_human" ]; then
+            print_msg "Зависимости:"
+            while IFS= read -r dep; do
+                [ -n "$dep" ] && print_msg "  $dep"
+            done <<< "$dependencies_human"
+        else
+            print_msg "Зависимости: -----"
+        fi
+    fi
+    return 0
+}
+
+open_config() {
+    local conf="/etc/modman.conf"
+
+    if ! command -v xdg-open >/dev/null 2>&1; then
+        fatal_err "Команда xdg-open не найдена."
+        return 1
+    fi
+
+    if [ "$(id -u)" = "0" ]; then
+        xdg-open "$conf" >/dev/null 2>&1 &
+        return 0
+    fi
+
+    xdg-open "admin://$conf" >/dev/null 2>&1 &
+    return 0
+}
+
+# ==========================================
+# ПАРСИНГ АРГУМЕНТОВ
+# ==========================================
+
+print_help() {
+    local style="${CLI_STYLE:-pacman}"
+    cat <<EOF
+modman — менеджер .${EXT} модулей PuppyRus / совместимых дистрибутивов.
+
+Использование:
+    modman [--machine] <команда> [аргументы]
+
+EOF
+    if [ "$style" = "apt" ]; then
+        cat <<EOF
+Команды (apt-style):
+    update                    Синхронизировать локальный кэш индексов с зеркалами.
+    search <имя>              Найти модули в индексах (подстрочный поиск).
+    install <модуль>          Скачать .${EXT} и подключить (pfsload). Резолвит зависимости.
+    download <модуль>         Скачать .${EXT} без подключения.
+    remove <модуль>           Отключить загруженный модуль (pfsunload). Принимает короткое имя
+                              (напр. "evince") — будет резолвлен в полное имя из списка mounted.
+EOF
+    else
+        cat <<EOF
+Команды (pacman-style):
+    -Sy                       Синхронизировать локальный кэш индексов с зеркалами.
+    -Ss <имя>                 Найти модули в индексах (подстрочный поиск).
+    -S <модуль>               Скачать .${EXT} и подключить (pfsload). Резолвит зависимости
+                              через 000-dependencies.txt; пропускает deps из MODMAN_IGNORE_DEPS.
+    -D <модуль>               Скачать .${EXT} без подключения.
+    -S <путь/файл.${EXT}>           Установить локальный .${EXT} файл по пути (без скачивания).
+                              Принимается путь содержащий /, начинающийся с . или ~,
+                              указывающий на существующий .${EXT} файл.
+    -R <модуль>               Отключить загруженный модуль (pfsunload). Принимает короткое имя
+                              (напр. "evince") — будет резолвлен в полное имя из списка mounted.
+EOF
+    fi
+    cat <<EOF
+
+Сервисные команды (общие для обоих стилей):
+    -mi <dir>                 Сгенерировать 000-index.txt в каталоге <dir> (для мейнтейнера).
+    -di <dir>                 Сгенерировать 000-dependencies.txt в каталоге <dir> (для мейнтейнера).
+    --list-local              Показать локальные .${EXT}: DOWNLOAD_DIR, а для rootaufs2 также
+                              base/modules/optional рядом с dir= из /proc/cmdline.
+    --list-loaded             Показать все загруженные модули (источник: pfsinfo --machine --mount,
+                              fallback: /sys/fs/aufs).
+    --list-loaded-before      Показать только модули, загруженные initrd до старта системы.
+    --list-loaded-after       Показать только модули, подключённые после старта системы.
+    --check-updates           Проверить обновления для всех обнаруженных модулей (без изменений файлов).
+    --update <id>             Применить одно обновление по id из --check-updates.
+                              Системные модули (risk=system) требуют --confirm-system-updates.
+                              Коды: 0 ок, 8 system без подтверждения, 1 ошибка.
+    --update-all              Применить все доступные обновления.
+                              Системные пропускаются (skipped/needs_confirmation) без --confirm-system-updates.
+    --remove-local <имя...>   Удалить скачанные .${EXT} файлы из DOWNLOAD_DIR.
+                              Вариативный: несколько имён через пробел. Принимает имя
+                              или имя.${EXT}. Проверяет смонтированность — отклоняет.
+                              Коды: 0 ок, 7 невалидное, 8 смонтирован, 9 другая ошибка.
+    --list-old                Показать .${EXT}.old файлы в base/modules/optional rootaufs2.
+    --remove-old <путь...>    Удалить выбранные .${EXT}.old файлы из base/modules/optional.
+    -Qp <путь/файл.${EXT}>          Показать информацию о локальном .${EXT} файле.
+    --file-info <путь>         То же, что -Qp.
+    --open-config             Открыть /etc/modman.conf через xdg-open.
+    -h, --help                Показать эту справку.
+
+Короткие псевдонимы:
+    -L                        Эквивалент --list-loaded
+    -Lb                       Эквивалент --list-loaded-before
+    -La                       Эквивалент --list-loaded-after
+    -Ql                       Эквивалент --list-local
+    -Rl <имя...>              Эквивалент --remove-local
+
+Глобальные опции:
+    --machine                 Машинный вывод (TSV). Подавляет цветной/человеческий текст.
+    --confirm-system-updates  Разрешить обновление системных модулей (risk=system).
+                              Без этого флага --update и --update-all пропускают их (exit 8).
+    -d, --download-dir DIR    Override DOWNLOAD_DIR на эту команду (поверх config + autodetect).
+                              Полезно если автоопределённый каталог read-only.
+    --force-deps              Не прерывать установку при провале установки зависимости.
+                              По умолчанию любая failed dep → abort parent install.
+                              НЕБЕЗОПАСНО — модуль может не работать без зависимостей.
+    --progress-file PATH      Писать машинно-читаемый прогресс скачивания в файл.
+                              Эквивалент env MODMAN_PROGRESS_FILE, но переживает pkexec.
+                              Формат строк: name=<имя>\\nstage=download\\npct=<0..100>\\n.
+                              Используется GUI для отображения прогресс-бара.
+    --lower                   Подключить модуль в нижний слой AUFS (передаёт pfsload -l).
+    --upper                   Подключить модуль в верхний слой AUFS (передаёт pfsload -u).
+    --toram                   Скопировать модуль в tmpfs и подключить (передаёт pfsload -r).
+    --load-cmd="CMD"          Заменить CMD_LOAD целиком. Команда разбивается по пробелам
+                              (word-splitting). Пути с пробелами в команде не поддерживаются.
+                              Пример: --load-cmd="pfsramload -l".
+
+Конфигурация: /etc/modman.conf (см. man modman.conf).
+    DOWNLOAD_DIR              Каталог скачивания .${EXT}.
+    CACHE_DIR                 Каталог кэша (db.txt + dependencies.txt внутри).
+                              Legacy CACHE_FILE=/path/to/db.txt тоже принимается.
+    MODMAN_IGNORE_DEPS        Glob-паттерны deps, которые пропускать (см. modman.conf).
+    AUFS_INITRD_PREFIX        Префикс путей base-модулей (per-initrd).
+    EXT                       Расширение файлов модулей (по умолчанию: pfs).
+
+Примеры:
+    modman --machine -Ss browser     # машинный поиск
+    sudo modman -S evince            # установка с резолвом deps
+    sudo modman -R evince            # удаление по короткому имени
+    modman --list-loaded-before      # модули из initrd
+EOF
+}
+
+CMD="$1"
+ARG="$2"
+
+case "$CMD" in
+    -h|--help|help) print_help; exit 0 ;;
+    "") print_help; exit 0 ;;
+esac
+
+mkdir -p "$DOWNLOAD_DIR" 2>/dev/null || true
+mkdir -p "$(dirname "$CACHE_FILE")" 2>/dev/null || true
+
+if [ "$CLI_STYLE" == "pacman" ]; then
+    case "$CMD" in
+        -mi) make_index "$ARG" ;;
+        -di) make_deps "$ARG" ;;
+        -Sy) sync_db ;;
+        -Ss) search_module "$ARG" ;;
+        -S)  install_module "$ARG" ;;
+        -D|--download) download_module "$ARG" ;;
+        -R)  remove_module "$ARG" ;;
+        --list-local|-Ql) list_local ;;
+        --list-loaded|-L) list_loaded "$ARG" ;;
+        --list-loaded-before|-Lb) list_loaded "before" ;;
+        --list-loaded-after|-La) list_loaded "after" ;;
+        --check-updates) check_updates ;;
+        --update) apply_update "$ARG"; exit $? ;;
+        --update-all) update_all; exit $? ;;
+        --update-blacklist-list) update_blacklist_list ;;
+        --update-blacklist-add) update_blacklist_add "$ARG" ;;
+        --update-blacklist-remove) shift; update_blacklist_remove "$@"; exit $? ;;
+        --remove-local|-Rl) shift; remove_local "$@"; exit $? ;;
+        --list-old) list_old_modules ;;
+        --remove-old) shift; remove_old_modules "$@"; exit $? ;;
+        -Qp|--file-info) query_file_info "$ARG"; exit $? ;;
+        --open-config) open_config ;;
+        --deps) list_module_deps "$ARG" ;;
+        *) print_help >&2; exit 1 ;;
+    esac
+elif [ "$CLI_STYLE" == "apt" ]; then
+    case "$CMD" in
+        -mi) make_index "$ARG" ;;
+        -di) make_deps "$ARG" ;;
+        update) sync_db ;;
+        search) search_module "$ARG" ;;
+        install) install_module "$ARG" ;;
+        download) download_module "$ARG" ;;
+        remove) remove_module "$ARG" ;;
+        --list-local|-Ql) list_local ;;
+        --list-loaded|-L) list_loaded "$ARG" ;;
+        --list-loaded-before|-Lb) list_loaded "before" ;;
+        --list-loaded-after|-La) list_loaded "after" ;;
+        --check-updates) check_updates ;;
+        --update) apply_update "$ARG"; exit $? ;;
+        --update-all) update_all; exit $? ;;
+        --update-blacklist-list) update_blacklist_list ;;
+        --update-blacklist-add) update_blacklist_add "$ARG" ;;
+        --update-blacklist-remove) shift; update_blacklist_remove "$@"; exit $? ;;
+        --remove-local|-Rl) shift; remove_local "$@"; exit $? ;;
+        --list-old) list_old_modules ;;
+        --remove-old) shift; remove_old_modules "$@"; exit $? ;;
+        -Qp|--file-info) query_file_info "$ARG"; exit $? ;;
+        --open-config) open_config ;;
+        --deps) list_module_deps "$ARG" ;;
+        *) print_help >&2; exit 1 ;;
+    esac
+fi

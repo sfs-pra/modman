@@ -1,0 +1,66 @@
+.TH MODMAN-TUI 8 "2026-05-29" "modman" "Системное администрирование"
+.SH NAME
+modman-tui - терминальный dialog-фронтенд для modman
+.SH SYNOPSIS
+.B modman-tui
+[--help|--version]
+.SH DESCRIPTION
+.B modman-tui
+- опциональный Bash + dialog фронтенд для modman(8). Это только слой
+представления: все списки и действия проходят через
+.B modman --machine,
+а runtime-операции остаются внутри backend и pfs-utils.
+.PP
+TUI не вызывает pfs-utils, pacman, sudo или pkexec напрямую и не разбирает
+человеческий вывод modman.
+.SH МЕНЮ
+.TP
+.B Подключенные
+Выполняет modman --machine --list-loaded-after. Выбранный модуль можно
+посмотреть или отключить после подтверждения через modman --machine -R <имя>.
+.TP
+.B Система
+Выполняет modman --machine --list-loaded-before. Выбранный модуль можно
+посмотреть или отключить после подтверждения через modman --machine -R <имя>.
+.TP
+.B Локальные
+Выполняет modman --machine --list-local. Выбранные модули подключаются через
+modman --machine -S <путь-или-имя>, удаляются после подтверждения через
+modman --machine --remove-local <имя...>. Выбор файла также передаётся backend
+через -S.
+.TP
+.B Инет / поиск
+Запрашивает строку поиска и выполняет modman --machine -Ss <запрос>.
+Установка выбранных результатов выполняется только после подтверждения.
+.TP
+.B Обновления
+Выполняет modman --machine --check-updates. normal/loaded обновления включены
+по умолчанию, system выключены и требуют отдельного подтверждения перед
+--confirm-system-updates --update <id>. Чёрный список меняется только
+командами backend --update-blacklist-*.
+.TP
+.B Очистка старых .pfs.old
+Выполняет modman --machine --list-old, принимает только поддерживаемые
+machine-строки backend. Удаление требует подтверждения и вызывает
+modman --machine --remove-old.
+.TP
+.B Настройки / О программе
+Показывает путь к конфигу и сведения о программе только для чтения. Редактор
+не запускается, --open-config не вызывается.
+.SH ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+.TP
+.B MODMAN_BIN
+Путь к backend. По умолчанию первый modman из PATH.
+.TP
+.B DIALOG_BIN
+Путь к dialog. По умолчанию первый dialog из PATH.
+.TP
+.B MODMAN_TUI_TMPDIR
+Переопределение временного каталога, в основном для автоматических тестов.
+.SH ОБРАБОТКА ОШИБОК
+Если команда backend недоступна или выдаёт неподдерживаемую machine-схему,
+TUI показывает сообщение о недоступной функции и возвращается в предыдущее
+меню. Неподдержанные list-команды не запускают последующие изменяющие
+операции.
+.SH SEE ALSO
+modman(8), modman.conf(5), dialog(1)

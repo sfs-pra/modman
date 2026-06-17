@@ -1,0 +1,33 @@
+# Compiled binaries
+modman-gui
+*.o
+*.a
+
+# Coverage artefacts
+*.gcda
+*.gcno
+*.gcov
+
+# Test binaries (keep source, ignore compiled)
+tests/test_*
+!tests/test_*.c
+!tests/test_*.sh
+!tests/test_*.bats
+tests/*.log
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+
+# Build dirs
+build/
+.cache/
+
+# Evidence (prometheus artefacts — only evidence/ dir excluded, plans/drafts committed)
+.sisyphus/evidence/
+
+# Arch packaging artefacts
+*.pkg.tar.zst
+src/
+pkg/

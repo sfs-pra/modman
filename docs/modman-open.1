@@ -1,0 +1,103 @@
+.TH MODMAN-OPEN 1 "2026-06-01" "modman" "User Commands"
+.SH NAME
+modman-open \- GTK opener for one local PFS module file
+.SH SYNOPSIS
+.B modman-open FILE
+.PP
+.B modman-open
+[\fB--help\fR|\fB--version\fR]
+.SH DESCRIPTION
+.B modman-open
+opens exactly one local
+.I .pfs
+module file from a command line or file manager. It is a small attach and
+unload helper, not a full module manager.
+.PP
+The utility validates the selected file through the
+.B modman
+backend, shows the module status, size and filesystem details in a GTK dialog,
+and offers only the actions that fit that file. It does not show repository
+tabs, system module lists, package extraction, package install checkboxes,
+safe mode, upper layer options, or batch file handling.
+.PP
+All runtime changes go through
+.B modman.
+The GTK utility does not call pfs runtime helpers directly. Attach operations
+are sent to the backend with the selected file path. Unload operations use the
+module name derived by the backend from that file, then ask
+.B modman
+to unload that name.
+.SH ARGUMENTS
+.TP
+.B FILE
+Path to one local
+.I .pfs
+file. The desktop integration passes one file with
+.B %f,
+not a multi-file
+.B %F
+argument. Missing files, non-local paths, and wrong extensions are rejected
+before attach or unload actions are offered. If the filesystem format cannot be
+identified, the dialog shows it as unknown instead of treating that alone as a
+hard error.
+.SH FILE MANAGER INTEGRATION
+.B modman-open.desktop
+registers the utility as an open-with handler for
+.BR application/x-pfs .
+Shared MIME data maps
+.I *.pfs
+files to the same
+.B application/x-pfs
+type. After the desktop database and MIME cache are updated by packaging or the
+user session, a file manager can offer
+.B modman-open
+for a single selected PFS module file.
+.PP
+The desktop entry must use:
+.PP
+.B Exec=modman-open %f
+.PP
+This keeps the helper in single-file mode and avoids unsupported batch attach
+or unload flows.
+.SH OPERATIONS
+.TP
+.B Inspect
+The helper asks
+.B modman
+for machine-readable information about
+.I FILE,
+including the resolved path, derived module name, format, size, and loaded
+state. When helper tools are installed, format details may include
+.B unsquashfs
+or
+.B dump.erofs
+metadata such as compression.
+.TP
+.B Attach
+When the file is valid and not already attached, the dialog can attach it
+through
+.B modman
+using the selected local path. The dialog can pass optional lower-layer and RAM
+copy flags to the backend; it still does not call pfs runtime helpers directly.
+.TP
+.B Unload
+When the file appears attached, the dialog can unload it through
+.B modman
+using the derived module name. If the backend reports that the module is busy,
+blocked by dependencies, or otherwise unsafe to remove, the dialog reports that
+failure and leaves the module attached.
+.SH EXIT STATUS
+.TP
+.B 0
+Help, version, or completed dialog flow.
+.TP
+.B 1
+Missing required file argument or command-line usage error.
+.SH ENVIRONMENT
+.TP
+.B MODMAN_BIN
+Optional backend path used by tests and custom environments. If unset, the
+utility uses the configured backend default.
+.SH SEE ALSO
+modman(8), modman-tui(8), modman.conf(5), update-desktop-database(1),
+update-mime-database(1)

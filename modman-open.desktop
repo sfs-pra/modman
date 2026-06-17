@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=modman-open
+Name[ru]=modman-open
+Comment=Open a .pfs module file
+Comment[ru]=Открыть файл модуля .pfs
+Exec=modman-open %f
+Icon=package-x-generic
+Terminal=false
+Categories=System;
+MimeType=application/x-pfs;
+StartupWMClass=modman-open
+NoDisplay=true

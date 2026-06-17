@@ -1,0 +1,191 @@
+# Maintainer: sfs <sfslinux@gmail.com>
+# VCS (git) build variant of the modman package set.
+# Builds modman / modman-gui / modman-tui from the upstream git repository
+# instead of the local working tree.
+#
+# Source repo: https://github.com/sfs-pra/modman
+# Usage:       makepkg -p PKGBUILD.git
+#
+# Differs from ./PKGBUILD only in source acquisition: the whole tree
+# (src/, include/, docs/, po/, data/, systemd/, ...) arrives via the git
+# clone, so the flat source[] list and the staging prepare() are not needed.
+pkgbase=modman
+pkgname=('modman' 'modman-gui' 'modman-tui')
+_gitname=modman
+_basever=2026.04
+pkgver=2026.04
+pkgrel=53
+pkgdesc="Module manager for any frugal / live-CD Linux"
+arch=('x86_64' 'aarch64')
+url="https://github.com/sfs-pra/modman"
+license=('MIT')
+makedepends=('git' 'gcc' 'pkgconf' 'check' 'bats' 'shellcheck' 'gettext')
+source=("${_gitname}::git+https://github.com/sfs-pra/modman.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/$_gitname"
+    local _count _hash
+    _count="$(git rev-list --count HEAD 2>/dev/null || printf '0')"
+    _hash="$(git rev-parse --short HEAD 2>/dev/null || printf '0000000')"
+    printf '%s.r%s.g%s' "$_basever" "$_count" "$_hash"
+}
+
+build() {
+    cd "$srcdir/$_gitname"
+
+    local -a CFLAGS_EX=(
+        -Wall
+        -Wextra
+        -O2
+        -pipe
+        -Iinclude
+        "-DDEFAULT_MODMAN_BIN=\"/usr/bin/modman\""
+        "-DDEFAULT_DOWNLOAD_DIR=\"/var/lib/modman/modules\""
+        "-DMODMAN_LOCALEDIR=\"/usr/share/locale\""
+    )
+
+    gcc "${CFLAGS_EX[@]}" \
+        src/main.c src/ui.c src/backend.c src/model.c src/validators.c src/capabilities.c src/ui_debug.c \
+        $(pkg-config --cflags --libs gtk+-3.0 gio-2.0) \
+        -o modman-gui
+
+    gcc "${CFLAGS_EX[@]}" \
+        src/open_main.c src/open_ui.c src/backend.c src/model.c src/validators.c \
+        $(pkg-config --cflags --libs gtk+-3.0 gio-2.0) \
+        -o modman-open
+
+    local lang
+    for lang in $(cat po/LINGUAS); do
+        msgfmt "po/${lang}.po" -o "po/${lang}.mo"
+    done
+    for lang in $(cat po/modman-tui/LINGUAS); do
+        msgfmt "po/modman-tui/${lang}.po" -o "po/modman-tui/${lang}.mo"
+    done
+}
+
+check() {
+    cd "$srcdir/$_gitname"
+
+    bash -n modman modman-tui modman-selftest modman-update-check
+
+    if command -v bats >/dev/null 2>&1; then
+        bats tests/bats/modman-file-info.bats
+        bats tests/bats/modman-open-contracts.bats
+    else
+        printf '%s\n' 'check(): skipping bats (tool missing in environment)'
+    fi
+
+    if command -v desktop-file-validate >/dev/null 2>&1; then
+        desktop-file-validate modman-open.desktop
+    else
+        printf '%s\n' 'check(): skipping desktop-file-validate (tool missing in environment)'
+    fi
+
+    if command -v update-mime-database >/dev/null 2>&1; then
+        local mime_root
+        mime_root="$(mktemp -d)"
+        mkdir -p "$mime_root/packages"
+        cp data/mime/packages/modman-open.xml "$mime_root/packages/"
+        update-mime-database -n "$mime_root"
+        rm -rf "$mime_root"
+    else
+        printf '%s\n' 'check(): skipping update-mime-database (tool missing in environment)'
+    fi
+}
+
+package_modman() {
+    pkgdesc="CLI module manager backend for any frugal / live-CD Linux"
+    depends=('bash' 'pfs-utils-cli>=2026.04')
+    optdepends=('erofs-utils: erofs format support'
+                'modman-gui: optional GTK3 graphical frontend'
+                'modman-tui: optional dialog terminal frontend')
+    conflicts=('pfs-utils-cli<2026.04')
+    provides=('modman')
+    backup=('etc/modman.conf')
+
+    cd "$srcdir/$_gitname"
+    local lang
+
+    install -dm755 "$pkgdir/usr/bin"
+    install -dm755 "$pkgdir/etc"
+    install -dm755 "$pkgdir/usr/share/man/man5"
+    install -dm755 "$pkgdir/usr/share/man/man8"
+    install -dm755 "$pkgdir/usr/share/man/ru/man5"
+    install -dm755 "$pkgdir/usr/share/man/ru/man8"
+    install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
+
+    install -dm755 "$pkgdir/etc/xdg/autostart"
+
+    # Runtime state directories (owned by package, created on install)
+    install -dm755 "$pkgdir/var/cache/modman"
+    install -dm755 "$pkgdir/var/lib/modman/modules"
+
+    install -m755 modman "$pkgdir/usr/bin/modman"
+    install -m755 modman-selftest "$pkgdir/usr/bin/modman-selftest"
+    install -m755 modman-update-check "$pkgdir/usr/bin/modman-update-check"
+
+    install -m644 modman.conf "$pkgdir/etc/modman.conf"
+    install -m644 modman-update-check.desktop "$pkgdir/etc/xdg/autostart/modman-update-check.desktop"
+    install -m644 docs/modman.conf.5 "$pkgdir/usr/share/man/man5/modman.conf.5"
+    install -m644 docs/modman.8 "$pkgdir/usr/share/man/man8/modman.8"
+    install -m644 docs/ru/modman.conf.5 "$pkgdir/usr/share/man/ru/man5/modman.conf.5"
+    install -m644 docs/ru/modman.8 "$pkgdir/usr/share/man/ru/man8/modman.8"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+    for lang in $(cat "$srcdir/$_gitname/po/LINGUAS"); do
+        install -Dm644 "$srcdir/$_gitname/po/${lang}.mo" \
+            "$pkgdir/usr/share/locale/${lang}/LC_MESSAGES/modman.mo"
+    done
+}
+
+package_modman-gui() {
+    pkgdesc="GTK3 graphical frontend and file opener for modman"
+    depends=('modman' 'gtk3' 'glib2')
+    optdepends=('squashfs-tools: show SquashFS details in modman-open'
+                'erofs-utils: show EROFS details in modman-open')
+
+    cd "$srcdir/$_gitname"
+
+    install -dm755 "$pkgdir/usr/bin"
+    install -dm755 "$pkgdir/usr/share/applications"
+    install -dm755 "$pkgdir/usr/share/polkit-1/rules.d"
+    install -dm755 "$pkgdir/usr/share/mime/packages"
+    install -dm755 "$pkgdir/usr/share/man/man1"
+    install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
+
+    install -m755 modman-gui "$pkgdir/usr/bin/modman-gui"
+    install -m755 modman-open "$pkgdir/usr/bin/modman-open"
+    install -m644 modman.desktop "$pkgdir/usr/share/applications/modman.desktop"
+    install -m644 modman-open.desktop "$pkgdir/usr/share/applications/modman-open.desktop"
+    install -m644 data/mime/packages/modman-open.xml \
+        "$pkgdir/usr/share/mime/packages/modman-open.xml"
+    install -m644 docs/modman-open.1 "$pkgdir/usr/share/man/man1/modman-open.1"
+    install -m644 40-modman.rules "$pkgdir/usr/share/polkit-1/rules.d/40-modman.rules"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_modman-tui() {
+    pkgdesc="Dialog terminal frontend for modman"
+    depends=('bash' 'dialog' 'gettext' 'modman')
+    optdepends=('squashfs-tools: show SquashFS compression details for local modules'
+                'erofs-utils: show EROFS compression details for local modules')
+
+    cd "$srcdir/$_gitname"
+
+    install -dm755 "$pkgdir/usr/bin"
+    install -dm755 "$pkgdir/usr/share/man/man8"
+    install -dm755 "$pkgdir/usr/share/man/ru/man8"
+    install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
+
+    install -m755 modman-tui "$pkgdir/usr/bin/modman-tui"
+    install -m644 docs/modman-tui.8 "$pkgdir/usr/share/man/man8/modman-tui.8"
+    install -m644 docs/ru/modman-tui.8 "$pkgdir/usr/share/man/ru/man8/modman-tui.8"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+    local lang
+    for lang in $(cat "$srcdir/$_gitname/po/modman-tui/LINGUAS"); do
+        install -Dm644 "$srcdir/$_gitname/po/modman-tui/${lang}.mo" \
+            "$pkgdir/usr/share/locale/${lang}/LC_MESSAGES/modman-tui.mo"
+    done
+}

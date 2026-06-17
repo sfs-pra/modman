@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# modman-update-check — non-mutating login-time update notifier for modman.
+# Runs modman --machine --check-updates; notifies via notify-send if updates
+# are found. Never invokes --update or mutates any files.
+#
+# Config vars (from modman.conf):
+#   UPDATE_CHECK_ON_LOGIN=1   — set to 0 to disable entirely
+#   UPDATE_CHECK_OPEN_GUI=0   — set to 1 to open modman-gui --updates on findings
+#
+# CLI flags:
+#   --open-gui   — override: open modman-gui --updates when updates found
+#   --help       — show usage
+
+set -Eeuo pipefail
+
+# ==========================================
+# Defaults
+# ==========================================
+
+UPDATE_CHECK_ON_LOGIN="${UPDATE_CHECK_ON_LOGIN:-1}"
+UPDATE_CHECK_OPEN_GUI="${UPDATE_CHECK_OPEN_GUI:-0}"
+_OPEN_GUI_FLAG=0
+
+# ==========================================
+# Config loading
+# ==========================================
+
+_load_conf() {
+    local conf_path=""
+
+    if [[ -n "${MODMAN_CONF:-}" ]]; then
+        conf_path="${MODMAN_CONF}"
+    elif [[ -f "${HOME:-/root}/.config/modman.conf" ]]; then
+        conf_path="${HOME:-/root}/.config/modman.conf"
+    elif [[ -f /etc/modman.conf ]]; then
+        conf_path=/etc/modman.conf
+    fi
+
+    [[ -z "$conf_path" ]] && return 0
+    [[ -f "$conf_path" ]] || return 0
+
+    # shellcheck source=/dev/null
+    source "$conf_path" || true
+}
+
+_load_conf
+
+# ==========================================
+# Argument parsing
+# ==========================================
+
+_usage() {
+    printf 'Usage: modman-update-check [--open-gui] [--help]\n'
+    printf '\n'
+    printf 'Non-mutating login-time update checker for modman.\n'
+    printf 'Reads UPDATE_CHECK_ON_LOGIN and UPDATE_CHECK_OPEN_GUI from modman.conf.\n'
+    printf '\n'
+    printf 'Options:\n'
+    printf '  --open-gui   Open modman-gui --updates when updates are found\n'
+    printf '  --help       Show this help and exit\n'
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --open-gui)
+            _OPEN_GUI_FLAG=1
+            shift
+            ;;
+        --help|-h)
+            _usage
+            exit 0
+            ;;
+        *)
+            printf 'modman-update-check: unknown option: %s\n' "$1" >&2
+            _usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+# ==========================================
+# Early exit: disabled in config
+# ==========================================
+
+if [[ "${UPDATE_CHECK_ON_LOGIN}" == "0" ]]; then
+    exit 0
+fi
+
+# ==========================================
+# Locate modman binary
+# ==========================================
+
+_find_modman() {
+    if [[ -n "${MODMAN_BIN:-}" ]]; then
+        printf '%s' "${MODMAN_BIN}"
+        return 0
+    fi
+    if command -v modman >/dev/null 2>&1; then
+        printf '%s' "$(command -v modman)"
+        return 0
+    fi
+    return 1
+}
+
+_MODMAN_BIN=""
+if ! _MODMAN_BIN="$(_find_modman)"; then
+    printf 'modman-update-check: modman not found; set MODMAN_BIN or install modman\n' >&2
+    exit 1
+fi
+
+# ==========================================
+# Run check-updates (read-only, never --update)
+# ==========================================
+
+_CHECK_OUTPUT=""
+_CHECK_STATUS=0
+_CHECK_OUTPUT="$("${_MODMAN_BIN}" --machine --check-updates 2>/dev/null)" || _CHECK_STATUS=$?
+
+# Non-zero exit from check-updates is non-fatal for the notifier
+if [[ $_CHECK_STATUS -ne 0 ]]; then
+    exit 0
+fi
+
+# Count update rows
+_UPDATE_COUNT=0
+_UPDATE_COUNT="$(printf '%s\n' "${_CHECK_OUTPUT}" | awk -F'\t' '$1=="update"{c++}END{print c+0}')"
+
+# No updates → silent exit
+if [[ "${_UPDATE_COUNT}" -eq 0 ]]; then
+    exit 0
+fi
+
+# ==========================================
+# Notify
+# ==========================================
+
+_notify() {
+    local count="$1"
+    local summary="Доступны обновления модулей"
+    local body
+    body="$(printf 'Найдено обновлений: %d. Откройте Менеджер модулей для установки.' "$count")"
+
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send \
+            --app-name="modman" \
+            --icon="software-update-available" \
+            --urgency=low \
+            "$summary" \
+            "$body" \
+            2>/dev/null || true
+    fi
+}
+
+_notify "${_UPDATE_COUNT}"
+
+# ==========================================
+# Optionally open GUI
+# ==========================================
+
+if [[ "${_OPEN_GUI_FLAG}" -eq 1 ]] || [[ "${UPDATE_CHECK_OPEN_GUI}" == "1" ]]; then
+    if command -v modman-gui >/dev/null 2>&1; then
+        modman-gui --updates &
+    fi
+fi
+
+exit 0

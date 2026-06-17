@@ -1,0 +1,491 @@
+#!/bin/sh
+# modman-selftest — самотестирование CLI-фич modman
+# Формат вывода повторяет pfs-utils/usr/bin/selftest: баннеры + сводка OK/FALSE/SKIP.
+# POSIX sh, busybox-safe. Не требует root (root-only тесты SKIP).
+
+PATH="/usr/bin:/usr/sbin:${PATH}"
+export PATH
+
+# --- working tmpdir ---
+TMPD="$(mktemp -d /tmp/.modman-selftest-$$.XXXXXX)"
+
+CLEAR() {
+    rm -rf "${TMPD}" 2>/dev/null
+    rm -rf /tmp/.modman-selftest-$$.* 2>/dev/null
+}
+
+trap 'CLEAR' EXIT INT TERM
+
+ex() {
+    printf "%b\n" "$m\n====== \033[31mTest aborted\033[0m ====="
+    CLEAR
+    exit 1
+}
+
+# --- locate modman ---
+MODMAN=""
+if command -v modman >/dev/null 2>&1; then
+    MODMAN="$(command -v modman)"
+fi
+if [ -z "${MODMAN}" ]; then
+    printf '\033[31mFATAL: modman not found in PATH\033[0m\n' >&2
+    exit 1
+fi
+
+# --- helper: make_cache(cache_dir, filename, size, date, desc) ---
+make_cache() {
+    _mc_dir="$1"; _mc_name="$2"; _mc_size="$3"; _mc_date="$4"; _mc_desc="$5"
+    printf '%s\t%s\t%s\t%s\textra\n' "${_mc_name}" "${_mc_size}" "${_mc_date}" "${_mc_desc}" \
+        >>"${_mc_dir}/db.txt"
+}
+
+# --- helper: make_cmd_load_stub(target_path, log_file) ---
+make_cmd_load_stub() {
+    _stub_path="$1"; _stub_log="$2"
+    cat >"${_stub_path}" <<STUBEOF
+#!/bin/sh
+for _a in "\$@"; do printf '%s\n' "\$_a" >>"\${STUB_LOG:-${_stub_log}}"; done
+exit "\${STUB_EXIT:-0}"
+STUBEOF
+    chmod +x "${_stub_path}"
+}
+
+# --- helper: make_wget_stub(target_path, log_file, download_dir) ---
+# shellcheck disable=SC2016
+make_wget_stub() {
+    _ws_path="$1"; _ws_log="$2"; _ws_dldir="$3"
+    cat >"${_ws_path}" <<STUBEOF
+#!/bin/sh
+printf '%s\n' "\$@" >>"${_ws_log}"
+_target=""
+while [ \$# -gt 0 ]; do
+    case "\$1" in
+        -O) _target="\$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [ -n "\${_target}" ]; then touch "\${_target}"; fi
+exit 0
+STUBEOF
+    chmod +x "${_ws_path}"
+}
+
+# ===== Per-test variable defaults (ANSI red FALSE) =====
+GRP1_HELP="\033[31mFALSE\033[0m"
+GRP1_MACHINE_HELP="\033[31mFALSE\033[0m"
+GRP1_D_SHORT="\033[31mFALSE\033[0m"
+GRP1_D_EQ="\033[31mFALSE\033[0m"
+GRP1_FORCE_DEPS="\033[31mFALSE\033[0m"
+GRP1_PF_EQ="\033[31mFALSE\033[0m"
+GRP1_PF_SPLIT="\033[31mFALSE\033[0m"
+GRP1_LOWER="\033[31mFALSE\033[0m"
+GRP1_UPPER="\033[31mFALSE\033[0m"
+GRP1_TORAM="\033[31mFALSE\033[0m"
+GRP1_EXCLUSIVE="\033[31mFALSE\033[0m"
+
+GRP2_INVALID="\033[31mFALSE\033[0m"
+GRP2_VALID_MISS="\033[31mFALSE\033[0m"
+
+GRP3_LOADED_AFTER="\033[31mFALSE\033[0m"
+GRP3_LIST_LOCAL="\033[31mFALSE\033[0m"
+GRP3_SEARCH_EMPTY="\033[31mFALSE\033[0m"
+GRP3_ALIASES="\033[31mFALSE\033[0m"
+
+GRP4_REMOVE_OK="\033[31mFALSE\033[0m"
+GRP4_REMOVE_MISS="\033[31mFALSE\033[0m"
+
+GRP5_PROGRESS_WRITE="\033[31mFALSE\033[0m"
+GRP5_PROTECTED_REG="\033[31mFALSE\033[0m"
+GRP5_DOT_BINARY="\033[31mFALSE\033[0m"
+
+GRP6_LOWER="\033[31mFALSE\033[0m"
+GRP6_UPPER="\033[31mFALSE\033[0m"
+GRP6_TORAM="\033[31mFALSE\033[0m"
+GRP6_LOWER_TORAM="\033[31mFALSE\033[0m"
+GRP6_UPPER_TORAM="\033[31mFALSE\033[0m"
+
+GRP7_EXIT_REPO="\033[31mFALSE\033[0m"
+GRP7_EXIT_LOCAL="\033[31mFALSE\033[0m"
+
+GRP8_RECURSE="\033[31mFALSE\033[0m"
+
+GRP9_HELP_COMPLETENESS="\033[31mFALSE\033[0m"
+
+m="\n=========== modman selftest ==========="
+
+# ========================================================================
+# Group 1: CLI flag parser (tests 1-11)
+# ========================================================================
+
+echo "############# Group 1: --help exits 0 ##############"
+out="$("${MODMAN}" --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_HELP=OK
+m="$m\n1:  --help                $GRP1_HELP"
+
+echo "############# Group 1: --machine --help ##############"
+out="$("${MODMAN}" --machine --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_MACHINE_HELP=OK
+m="$m\n2:  --machine --help      $GRP1_MACHINE_HELP"
+
+echo "############# Group 1: -d consumes value ##############"
+out="$("${MODMAN}" -d /nonexistent/path --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_D_SHORT=OK
+m="$m\n3:  -d <value> --help     $GRP1_D_SHORT"
+
+echo "############# Group 1: --download-dir= ##############"
+out="$("${MODMAN}" --download-dir=/nonexistent/path --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_D_EQ=OK
+m="$m\n4:  --download-dir=PATH   $GRP1_D_EQ"
+
+echo "############# Group 1: --force-deps ##############"
+out="$("${MODMAN}" --force-deps --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_FORCE_DEPS=OK
+m="$m\n5:  --force-deps --help   $GRP1_FORCE_DEPS"
+
+echo "############# Group 1: --progress-file=PATH ##############"
+out="$("${MODMAN}" --progress-file=/tmp/x --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_PF_EQ=OK
+m="$m\n6:  --progress-file=PATH  $GRP1_PF_EQ"
+
+echo "############# Group 1: --progress-file PATH (split) ##############"
+out="$("${MODMAN}" --progress-file /tmp/x --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_PF_SPLIT=OK
+m="$m\n7:  --progress-file PATH  $GRP1_PF_SPLIT"
+
+echo "############# Group 1: --lower ##############"
+out="$("${MODMAN}" --lower --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_LOWER=OK
+m="$m\n8:  --lower --help        $GRP1_LOWER"
+
+echo "############# Group 1: --upper ##############"
+out="$("${MODMAN}" --upper --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_UPPER=OK
+m="$m\n9:  --upper --help        $GRP1_UPPER"
+
+echo "############# Group 1: --toram ##############"
+out="$("${MODMAN}" --toram --help 2>&1)"; rc=$?
+case "${out}" in *Использование*|*Usage*) ;; *) rc=99 ;; esac
+[ "${rc}" -eq 0 ] && GRP1_TORAM=OK
+m="$m\n10: --toram --help        $GRP1_TORAM"
+
+echo "############# Group 1: --lower --upper mutually exclusive ##############"
+"${MODMAN}" --lower --upper --help >/dev/null 2>&1; rc=$?
+[ "${rc}" -eq 2 ] && GRP1_EXCLUSIVE=OK
+m="$m\n11: --lower --upper rc=2  $GRP1_EXCLUSIVE"
+
+# ========================================================================
+# Group 2: Name validation (tests 12-13)
+# ========================================================================
+
+echo "############# Group 2: invalid name rejected ##############"
+"${MODMAN}" -S 'invalid;name' </dev/null >/dev/null 2>&1; rc=$?
+[ "${rc}" -eq 2 ] && GRP2_INVALID=OK
+m="$m\n12: invalid;name rc=2    $GRP2_INVALID"
+
+echo "############# Group 2: valid name not found ##############"
+cache_dir2="${TMPD}/g2cache"
+mkdir -p "${cache_dir2}"
+: >"${cache_dir2}/db.txt"
+out="$(CACHE_FILE="${cache_dir2}/db.txt" DOWNLOAD_DIR="${TMPD}/g2dl" \
+    "${MODMAN}" -S valid_name_xyz_12345 2>&1)"; rc=$?
+if [ "${rc}" -eq 1 ]; then
+    case "${out}" in *"не найден"*) GRP2_VALID_MISS=OK ;; esac
+fi
+m="$m\n13: valid miss rc=1      $GRP2_VALID_MISS"
+
+# ========================================================================
+# Group 3: List & search (tests 14-17)
+# ========================================================================
+
+echo "############# Group 3: --machine --list-loaded-after ##############"
+if ! command -v pfs >/dev/null 2>&1; then
+    GRP3_LOADED_AFTER="\033[33mSKIP\033[0m (pfs not in PATH)"
+else
+    out="$("${MODMAN}" --machine --list-loaded-after 2>&1)"; rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        _bad=0
+        if [ -n "${out}" ]; then
+            _oldIFS="${IFS}"; IFS='
+'
+            for _ln in ${out}; do
+                case "${_ln}" in *"	"*) ;; *) _bad=1 ;; esac
+            done
+            IFS="${_oldIFS}"
+        fi
+        [ "${_bad}" -eq 0 ] && GRP3_LOADED_AFTER=OK
+    fi
+fi
+m="$m\n14: --list-loaded-after  $GRP3_LOADED_AFTER"
+
+echo "############# Group 3: --machine --list-local (fixture) ##############"
+dl_dir3="${TMPD}/g3dl"
+mkdir -p "${dl_dir3}"
+touch "${dl_dir3}/test-fixture-1.0.pfs"
+out="$(DOWNLOAD_DIR="${dl_dir3}" "${MODMAN}" --machine --list-local 2>&1)"; rc=$?
+if [ "${rc}" -eq 0 ]; then
+    case "${out}" in *test-fixture*) GRP3_LIST_LOCAL=OK ;; esac
+fi
+m="$m\n15: --list-local fixture $GRP3_LIST_LOCAL"
+
+echo "############# Group 3: search returns empty on nonexistent ##############"
+g3_cache="${TMPD}/g3cache"
+mkdir -p "${g3_cache}"
+printf 'realmod-1.0.pfs\t10M\t2026-01-01\treal module\textra\n' >"${g3_cache}/db.txt"
+out="$(CACHE_FILE="${g3_cache}/db.txt" "${MODMAN}" --machine -Ss nonexistent_xyzzy_12345 2>&1)"; rc=$?
+[ "${rc}" -eq 0 ] && [ -z "${out}" ] && GRP3_SEARCH_EMPTY=OK
+m="$m\n16: -Ss empty result     $GRP3_SEARCH_EMPTY"
+
+echo "############# Group 3: aliases (-La == --list-loaded-after) ##############"
+if ! command -v pfs >/dev/null 2>&1; then
+    GRP3_ALIASES="\033[33mSKIP\033[0m (pfs not in PATH)"
+else
+    out_long="$("${MODMAN}" --machine --list-loaded-after 2>/dev/null)"
+    out_alias="$("${MODMAN}" --machine -La 2>/dev/null)"
+    if [ "${out_long}" = "${out_alias}" ]; then
+        GRP3_ALIASES=OK
+    fi
+fi
+m="$m\n17: -La alias matches    $GRP3_ALIASES"
+
+# ========================================================================
+# Group 4: Remove-local (tests 18-19)
+# ========================================================================
+
+echo "############# Group 4: remove-local happy path ##############"
+dl_dir4="${TMPD}/g4dl"
+mkdir -p "${dl_dir4}"
+touch "${dl_dir4}/removeme.pfs"
+out="$(DOWNLOAD_DIR="${dl_dir4}" "${MODMAN}" --machine --remove-local removeme 2>&1)"; rc=$?
+if [ "${rc}" -eq 0 ] && [ ! -f "${dl_dir4}/removeme.pfs" ]; then
+    GRP4_REMOVE_OK=OK
+fi
+m="$m\n18: remove-local ok      $GRP4_REMOVE_OK"
+
+echo "############# Group 4: remove-local not found ##############"
+dl_dir4b="${TMPD}/g4dl2"
+mkdir -p "${dl_dir4b}"
+DOWNLOAD_DIR="${dl_dir4b}" "${MODMAN}" --machine --remove-local nonexistent_zzz 2>/dev/null; rc=$?
+[ "${rc}" -eq 9 ] && GRP4_REMOVE_MISS=OK
+m="$m\n19: remove-local miss    $GRP4_REMOVE_MISS"
+
+# ========================================================================
+# Group 5: Progress-file (tests 20-22)
+# ========================================================================
+
+echo "############# Group 5: progress-file initial write ##############"
+g5_cache="${TMPD}/g5cache"
+g5_dl="${TMPD}/g5dl"
+g5_pf="${TMPD}/g5progress.txt"
+g5_cmdlog="${TMPD}/g5cmd.log"
+g5_wgetlog="${TMPD}/g5wget.log"
+g5_bin="${TMPD}/g5bin"
+mkdir -p "${g5_cache}" "${g5_dl}" "${g5_bin}"
+make_cache "${g5_cache}" "testmod-1.0.pfs" "10M" "2026-01-01" "test module"
+make_cmd_load_stub "${g5_bin}/pfsload" "${g5_cmdlog}"
+make_wget_stub "${g5_bin}/wget" "${g5_wgetlog}" "${g5_dl}"
+
+PATH="${g5_bin}:${PATH}" \
+    CMD_LOAD="pfsload" \
+    CACHE_FILE="${g5_cache}/db.txt" \
+    DOWNLOAD_DIR="${g5_dl}" \
+    "${MODMAN}" --progress-file="${g5_pf}" -S testmod >/dev/null 2>&1; rc=$?
+
+if [ -f "${g5_pf}" ]; then
+    _has_name=0; _has_stage=0; _has_pct=0
+    # shellcheck disable=SC2013
+    for _kv in $(cat "${g5_pf}"); do
+        case "${_kv}" in name=*) _has_name=1 ;; stage=download*) _has_stage=1 ;; pct=*) _has_pct=1 ;; esac
+    done
+    [ "${_has_name}" -eq 1 ] && [ "${_has_stage}" -eq 1 ] && [ "${_has_pct}" -eq 1 ] && GRP5_PROGRESS_WRITE=OK
+fi
+m="$m\n20: progress-file write  $GRP5_PROGRESS_WRITE"
+
+echo "############# Group 5: fs.protected_regular workaround ##############"
+if [ "$(id -u)" -ne 0 ]; then
+    GRP5_PROTECTED_REG="\033[33mSKIP\033[0m (requires root)"
+else
+    g5b_pf="${TMPD}/g5b_progress.txt"
+    touch "${g5b_pf}"
+    chown nobody "${g5b_pf}" 2>/dev/null || true
+    chmod 0644 "${g5b_pf}"
+
+    g5b_cache="${TMPD}/g5bcache"
+    g5b_dl="${TMPD}/g5bdl"
+    g5b_bin2="${TMPD}/g5bbin"
+    mkdir -p "${g5b_cache}" "${g5b_dl}" "${g5b_bin2}"
+    make_cache "${g5b_cache}" "testmod2-1.0.pfs" "10M" "2026-01-01" "test2"
+    make_cmd_load_stub "${g5b_bin2}/pfsload" "${TMPD}/g5b_cmd.log"
+    make_wget_stub "${g5b_bin2}/wget" "${TMPD}/g5b_wget.log" "${g5b_dl}"
+
+    PATH="${g5b_bin2}:${PATH}" \
+        CMD_LOAD="pfsload" \
+        CACHE_FILE="${g5b_cache}/db.txt" \
+        DOWNLOAD_DIR="${g5b_dl}" \
+        "${MODMAN}" --progress-file="${g5b_pf}" -S testmod2 >/dev/null 2>&1; rc=$?
+
+    if [ -f "${g5b_pf}" ]; then
+        case "$(cat "${g5b_pf}")" in *name=*) GRP5_PROTECTED_REG=OK ;; esac
+    fi
+fi
+m="$m\n21: protected_regular    $GRP5_PROTECTED_REG"
+
+echo "############# Group 5: wget --progress=dot:binary ##############"
+if [ -f "${g5_wgetlog}" ]; then
+    _found_dot_binary=0
+    # shellcheck disable=SC2013
+    for _arg in $(cat "${g5_wgetlog}"); do
+        case "${_arg}" in "--progress=dot:binary") _found_dot_binary=1 ;; esac
+    done
+    [ "${_found_dot_binary}" -eq 1 ] && GRP5_DOT_BINARY=OK
+fi
+m="$m\n22: dot:binary in wget   $GRP5_DOT_BINARY"
+
+# ========================================================================
+# Group 6: Pfsload mode forwarding (tests 23-27)
+# ========================================================================
+
+_run_mode_test() {
+    _rmt_flags="$1"
+    _rmt_expect="$2"
+    _rmt_cache="${TMPD}/g6cache_$$"
+    _rmt_dl="${TMPD}/g6dl_$$"
+    _rmt_bin="${TMPD}/g6bin_$$"
+    _rmt_log="${TMPD}/g6log_$$.txt"
+    rm -rf "${_rmt_cache}" "${_rmt_dl}" "${_rmt_bin}" "${_rmt_log}"
+    mkdir -p "${_rmt_cache}" "${_rmt_dl}" "${_rmt_bin}"
+    make_cache "${_rmt_cache}" "modetest-1.0.pfs" "5M" "2026-01-01" "mode test"
+    touch "${_rmt_dl}/modetest-1.0.pfs"
+    make_cmd_load_stub "${_rmt_bin}/pfsload" "${_rmt_log}"
+
+    # shellcheck disable=SC2086
+    PATH="${_rmt_bin}:${PATH}" \
+        CMD_LOAD="pfsload" \
+        CACHE_FILE="${_rmt_cache}/db.txt" \
+        DOWNLOAD_DIR="${_rmt_dl}" \
+        "${MODMAN}" ${_rmt_flags} -S modetest >/dev/null 2>&1
+
+    if [ -f "${_rmt_log}" ]; then
+        _rmt_got=""
+        while IFS= read -r _rmt_line; do
+            case "${_rmt_line}" in
+                -[lur]) _rmt_got="${_rmt_got}${_rmt_got:+ }${_rmt_line}" ;;
+            esac
+        done <"${_rmt_log}"
+        if [ "${_rmt_got}" = "${_rmt_expect}" ]; then
+            printf 'OK'
+        else
+            printf 'FAIL(got=%s)' "${_rmt_got}"
+        fi
+    else
+        printf 'FAIL(no_log)'
+    fi
+    rm -rf "${_rmt_cache}" "${_rmt_dl}" "${_rmt_bin}" "${_rmt_log}"
+}
+
+echo "############# Group 6: --lower forwards -l ##############"
+_r="$(_run_mode_test "--lower" "-l")"
+[ "${_r}" = "OK" ] && GRP6_LOWER=OK
+m="$m\n23: --lower -> -l        $GRP6_LOWER"
+
+echo "############# Group 6: --upper forwards -u ##############"
+_r="$(_run_mode_test "--upper" "-u")"
+[ "${_r}" = "OK" ] && GRP6_UPPER=OK
+m="$m\n24: --upper -> -u        $GRP6_UPPER"
+
+echo "############# Group 6: --toram forwards -r ##############"
+_r="$(_run_mode_test "--toram" "-r")"
+[ "${_r}" = "OK" ] && GRP6_TORAM=OK
+m="$m\n25: --toram -> -r        $GRP6_TORAM"
+
+echo "############# Group 6: --lower --toram -> -l -r ##############"
+_r="$(_run_mode_test "--lower --toram" "-l -r")"
+[ "${_r}" = "OK" ] && GRP6_LOWER_TORAM=OK
+m="$m\n26: --lower --toram      $GRP6_LOWER_TORAM"
+
+echo "############# Group 6: --upper --toram -> -u -r ##############"
+_r="$(_run_mode_test "--upper --toram" "-u -r")"
+[ "${_r}" = "OK" ] && GRP6_UPPER_TORAM=OK
+m="$m\n27: --upper --toram      $GRP6_UPPER_TORAM"
+
+# ========================================================================
+# Group 7: Exit-code propagation (tests 28-29)
+# ========================================================================
+
+echo "############# Group 7: exit code propagated from CMD_LOAD (repo) ##############"
+g7_cache="${TMPD}/g7cache"
+g7_dl="${TMPD}/g7dl"
+g7_bin="${TMPD}/g7bin"
+g7_log="${TMPD}/g7log.txt"
+mkdir -p "${g7_cache}" "${g7_dl}" "${g7_bin}"
+make_cache "${g7_cache}" "exitmod-1.0.pfs" "5M" "2026-01-01" "exit test"
+touch "${g7_dl}/exitmod-1.0.pfs"
+make_cmd_load_stub "${g7_bin}/pfsload" "${g7_log}"
+
+STUB_EXIT=7 \
+    PATH="${g7_bin}:${PATH}" \
+    CMD_LOAD="pfsload" \
+    CACHE_FILE="${g7_cache}/db.txt" \
+    DOWNLOAD_DIR="${g7_dl}" \
+    "${MODMAN}" -S exitmod >/dev/null 2>&1; rc=$?
+[ "${rc}" -eq 7 ] && GRP7_EXIT_REPO=OK
+m="$m\n28: exit-code repo rc=7  $GRP7_EXIT_REPO"
+
+echo "############# Group 7: exit code propagated from CMD_LOAD (local file) ##############"
+g7b_bin="${TMPD}/g7bbin"
+g7b_log="${TMPD}/g7blog.txt"
+g7b_file="${TMPD}/localtest.pfs"
+mkdir -p "${g7b_bin}"
+touch "${g7b_file}"
+make_cmd_load_stub "${g7b_bin}/pfsload" "${g7b_log}"
+
+STUB_EXIT=7 \
+    PATH="${g7b_bin}:${PATH}" \
+    CMD_LOAD="pfsload" \
+    "${MODMAN}" -S "${g7b_file}" >/dev/null 2>&1; rc=$?
+[ "${rc}" -eq 7 ] && GRP7_EXIT_LOCAL=OK
+m="$m\n29: exit-code local rc=7 $GRP7_EXIT_LOCAL"
+
+# ========================================================================
+# Group 8: Recursion-flag propagation (test 30)
+# ========================================================================
+
+echo "############# Group 8: recursion flag propagation ##############"
+GRP8_RECURSE="\033[33mSKIP\033[0m (requires recursion harness)"
+m="$m\n30: recurse-flags        $GRP8_RECURSE"
+
+# ========================================================================
+# Group 9: Help output completeness (test 31)
+# ========================================================================
+
+echo "############# Group 9: help mentions all key options ##############"
+help_out="$("${MODMAN}" --help 2>&1)"
+missing=""
+for kw in --progress-file --lower --upper --toram --download-dir --force-deps \
+          --machine --list-loaded-before --list-loaded-after --list-local \
+          --remove-local --list-old --remove-old --open-config; do
+    case "${help_out}" in
+        *"${kw}"*) ;;
+        *) missing="${missing}${missing:+ }${kw}" ;;
+    esac
+done
+if [ -z "${missing}" ]; then
+    GRP9_HELP_COMPLETENESS=OK
+else
+    GRP9_HELP_COMPLETENESS="\033[31mFALSE\033[0m (missing: ${missing})"
+fi
+m="$m\n31: help completeness    $GRP9_HELP_COMPLETENESS"
+
+# ========================================================================
+# Final report
+# ========================================================================
+
+printf "%b\n" "$m\n====== \033[32mTest finished\033[0m ====="

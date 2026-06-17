@@ -1,0 +1,64 @@
+.TH MODMAN-TUI 8 "2026-05-29" "modman" "System Administration"
+.SH NAME
+modman-tui - dialog terminal frontend for modman
+.SH SYNOPSIS
+.B modman-tui
+[--help|--version]
+.SH DESCRIPTION
+.B modman-tui
+is an optional Bash + dialog frontend for the modman(8) backend. It is a
+presentation layer only: every list and action goes through
+.B modman --machine,
+and filesystem/runtime work stays inside the backend and pfs-utils.
+.PP
+The TUI never calls pfs-utils, pacman, sudo, or pkexec directly, and it does
+not parse human-readable modman output.
+.SH MENU FLOWS
+.TP
+.B Connected modules
+Runs modman --machine --list-loaded-after. Selected modules can be viewed or
+detached after a dialog --yesno confirmation via modman --machine -R <name>.
+.TP
+.B System modules
+Runs modman --machine --list-loaded-before. Selected modules can be viewed or
+detached after confirmation via modman --machine -R <name>.
+.TP
+.B Local modules
+Runs modman --machine --list-local. Selected modules can be attached via
+modman --machine -S <path-or-name> or removed after confirmation via
+modman --machine --remove-local <name...>. A file selector can attach a chosen
+local file through the same backend install command.
+.TP
+.B Search
+Prompts for a query and runs modman --machine -Ss <query>. Selected results
+are installed only after confirmation with modman --machine -S.
+.TP
+.B Updates
+Runs modman --machine --check-updates. Normal and loaded-risk updates are
+selected by default; system-risk updates are off by default and require an
+extra confirmation before --confirm-system-updates --update <id> is used.
+Blacklist actions use only --update-blacklist-* backend commands.
+.TP
+.B Old cleanup
+Runs modman --machine --list-old and accepts only backend old-file rows.
+Removal requires confirmation and calls modman --machine --remove-old.
+.TP
+.B Settings / about
+Displays read-only config path information and about text. It does not launch
+an editor and does not call --open-config.
+.SH ENVIRONMENT
+.TP
+.B MODMAN_BIN
+Path to the backend executable. Defaults to the first modman in PATH.
+.TP
+.B DIALOG_BIN
+Path to the dialog executable. Defaults to the first dialog in PATH.
+.TP
+.B MODMAN_TUI_TMPDIR
+Temporary directory override, primarily for automated tests.
+.SH FAILURE HANDLING
+If a backend command is unavailable or emits an unsupported machine schema,
+the TUI shows an unavailable-function message and returns to the previous
+menu. Unsupported list commands never trigger follow-up mutation commands.
+.SH SEE ALSO
+modman(8), modman.conf(5), dialog(1)

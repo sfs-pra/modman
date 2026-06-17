@@ -1,0 +1,6 @@
+src/main.c
+src/ui.c
+src/backend.c
+src/model.c
+src/capabilities.c
+src/validators.c

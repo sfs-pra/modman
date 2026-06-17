@@ -1,0 +1,159 @@
+.TH MODMAN.CONF 5 "2026-04-22" "modman" "File Formats"
+.SH NAME
+modman.conf \- runtime configuration for modman and modman-gui
+.SH SYNOPSIS
+.B /etc/modman.conf
+.br
+.B ~/.config/modman/modman.conf
+.SH DESCRIPTION
+\fBmodman.conf\fR stores simple key-value settings for the modman backend.
+The parser is intentionally strict and does not execute shell code.
+.SH FORMAT
+Each non-empty non-comment line must use the form:
+.br
+.B KEY=VALUE
+.P
+Supported scalar values may be unquoted, single-quoted, or double-quoted.
+Whitespace around the key and value is trimmed.
+.P
+Unsafe shell substitution syntax is rejected, including:
+.IP \(bu 2
+\fB$(...)\fR
+.IP \(bu 2
+backticks
+.IP \(bu 2
+\fB${...}\fR
+.SH SEARCH ORDER
+.IP "1." 4
+\fB$XDG_CONFIG_HOME/modman/modman.conf\fR
+.IP "2." 4
+\fB~/.config/modman/modman.conf\fR
+.IP "3." 4
+\fB/etc/modman.conf\fR
+.IP "4." 4
+\fB/usr/share/modman/modman.conf\fR
+.SH KEYS
+.TP
+.B MODMAN_BIN
+Path to the modman executable.
+.TP
+.B DOWNLOAD_DIR
+Directory for downloaded modules.
+.TP
+.B AUFS_INITRD_PREFIX
+Prefix used to detect initrd-loaded modules. For mkinitcpio-rootaufs2 set to
+.IR /run/archroot/live/memory/images .
+.TP
+.B MODMAN_IGNORE_DEPS
+Whitespace-separated glob patterns of dependency names that
+.B modman -S
+must skip during dependency resolution. Use when deps are bundled into a
+distribution base module (e.g. \fI030-*\fR groups baked into \fI001-zz\fR).
+Default: empty (no deps skipped).
+.TP
+.B EXT
+File extension for module containers (without leading dot). Used by
+.B modman
+to glob the local cache, strip suffixes from package names, and detect
+bundle files in aufs branches. Override when using an alternate container
+format. Default: \fIpfs\fR.
+.TP
+.B AUFS_SYSTEM_PATH
+Prefix used for mounted module paths.
+.TP
+.B CMD_LOAD
+Optional command override for loading modules.
+.TP
+.B CMD_UNLOAD
+Optional command override for unloading modules.
+.TP
+.B IFS_SEP
+Optional field separator value for machine-readable output.
+.TP
+.B LAYERING_OVERRIDE
+Optional override for runtime layering detection.
+.TP
+.B PFSLOAD_ALLOW_LOWER
+Right-click menu command for loading a module to the lower AUFS layer.
+String value holds the full command (e.g. \fIpfsload -l\fR).
+Empty or absent \(-> menu item is hidden.
+.TP
+.B PFSLOAD_ALLOW_TORAM
+Right-click menu command for loading a module to RAM (e.g. \fIpfsload -r\fR).
+.TP
+.B PFSLOAD_ALLOW_LOWER_TORAM
+Right-click menu command for lower layer + RAM (e.g. \fIpfsload -l -r\fR).
+.TP
+.B PFSLOAD_ALLOW_UPPER_TORAM
+Right-click menu command for upper layer + RAM (e.g. \fIpfsload -u -r\fR).
+.SS Update check on login
+.PP
+The following keys control the behaviour of \fBmodman-update-check\fR(8),
+a helper script launched at login via XDG autostart.
+.PP
+.B Important:
+\fBmodman-update-check\fR \fBdoes not apply updates automatically\fR.
+It only checks for available updates and notifies the user via
+\fInotify-send\fR. To apply updates use \fBmodman --update\fR
+or \fBmodman --update-all\fR manually.
+.TP
+.B UPDATE_CHECK_ON_LOGIN
+Enable update checking at login.
+.RS
+.TP
+.B 1
+Enabled (default). \fBmodman-update-check\fR is launched automatically
+via \fI/etc/xdg/autostart/modman-update-check.desktop\fR at session start.
+.TP
+.B 0
+Disabled. The script exits immediately without calling \fBmodman\fR.
+.RE
+.TP
+.B UPDATE_CHECK_OPEN_GUI
+Open \fBmodman-gui --updates\fR when updates are found.
+.RS
+.TP
+.B 0
+Notification via \fInotify-send\fR only (default).
+.TP
+.B 1
+Additionally open the GUI with the updates tab in the background.
+.RE
+.TP
+.B UPDATE_BLACKLIST_FILE
+Path to the update blacklist file. Format: TSV, one entry per line:
+.RS
+.PP
+.B identity\etversion
+.PP
+Each entry blocks a specific version of a specific module. Matching is
+exact \(em glob patterns are not supported.
+.PP
+Default: \fI${MODMAN_STATE_DIR}/update-blacklist.tsv\fR
+(typically \fI/var/lib/modman/update-blacklist.tsv\fR). If the default path is
+used and the old \fI${CACHE_DIR}/update-blacklist.tsv\fR exists, \fBmodman\fR
+copies it to the persistent state path on the next blacklist operation.
+.PP
+The file's directory is created automatically on the first entry added via
+\fBmodman --update-blacklist-add\fR. For manual management the file can be
+edited directly \(em each line must contain exactly two TAB-separated fields.
+.RE
+.SS Reboot behaviour
+.PP
+When an updated module contains changes that require a reboot
+(\fBreboot_required=1\fR in machine output), \fBmodman\fR:
+.IP \(bu 2
+Emits the literal string \fB\[u043D]\[u0443]\[u0436]\[u043D]\[u0430] \[u043F]\[u0435]\[u0440]\[u0435]\[u0437]\[u0430]\[u0433]\[u0440]\[u0443]\[u0437]\[u043A]\[u0430]\fR in machine output after the \fBapplied\fR line.
+This Russian literal (\(lqreboot required\(rq) is part of the machine contract;
+parsers must match it verbatim.
+.IP \(bu 2
+Displays a warning in the GUI.
+.IP \(bu 2
+Writes a note to \fIupdate.log\fR alongside the updated file.
+.PP
+A reboot is never performed automatically. The user must reboot manually.
+.SH SECURITY
+The configuration loader never invokes a shell, does not support \fBsource\fR,
+and ignores unsupported shell constructs outside the documented key-value format.
+.SH SEE ALSO
+.BR modman (8)

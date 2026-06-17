@@ -1,0 +1,3 @@
+core-utils	12M	/repo/core-utils.pfs	Base utilities	1.0.0
+net-tools	7M	/repo/net-tools.pfs	Network toolkit	2.1.0
+dev-extra	55M	/repo/dev-extra.pfs	Developer add-ons	0.9.3

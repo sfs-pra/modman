@@ -1,0 +1,651 @@
+.TH MODMAN 8 "2026-05-05" "modman" "System Administration"
+.SH NAME
+modman \- pfs module manager (CLI backend for PuppyRus / rootaufs2 systems)
+.SH SYNOPSIS
+.B modman
+[\fB--machine\fR]
+[\fB-d\fR \fIDIR\fR | \fB--download-dir\fR \fIDIR\fR]
+[\fB--progress-file\fR \fIPATH\fR]
+[\fB--lower\fR | \fB--upper\fR | \fB--toram\fR]
+[\fB--load-cmd\fR \fICMD\fR]
+\fICOMMAND\fR
+[\fIARGS\fR]
+.PP
+.B modman
+[\fB--machine\fR]
+\fB--remove-local\fR|\fB-Rl\fR
+\fINAME\fR [\fINAME\fR ...]
+.PP
+.B modman -h
+|
+.B --help
+.SH DESCRIPTION
+\fBmodman\fR is the CLI backend that orchestrates discovery, download,
+dependency resolution, install (\fIpfsload\fR) and remove (\fIpfsunload\fR)
+of pfs container modules. It delegates filesystem-level operations to
+\fBpfs-utils\fR (\fIpfs\fR(8), \fIpfsload\fR, \fIpfsunload\fR,
+\fIpfsinfo\fR, \fIpfsbench\fR) and reads configuration from
+\fImodman.conf\fR(5).
+.PP
+modman supports two CLI dialects switched by the \fBCLI_STYLE\fR config
+key: \fIpacman\fR-style (\fB-S\fR, \fB-R\fR, \fB-Sy\fR, \fB-Ss\fR \(em the
+default) and \fIapt\fR-style (\fBinstall\fR, \fBremove\fR, \fBupdate\fR,
+\fBsearch\fR).
+.SH COMMANDS
+.SS Maintenance / discovery
+.TP
+.B -mi \fIDIR\fR
+Generate \fI000-index.txt\fR in \fIDIR\fR. Maintainer-only.
+.TP
+.B -di \fIDIR\fR
+Generate \fI000-dependencies.txt\fR in \fIDIR\fR by extracting
+\fIstart.sh\fR from each \fI*.${EXT}\fR present (default \fI.pfs\fR) and
+parsing the \fB<pkg>-dep\fR lines. Maintainer-only.
+.SS Cache sync
+.TP
+.B -Sy
+.RB ( apt :
+.BR update )
+Pull \fI000-index.txt\fR and \fI000-dependencies.txt\fR from the first
+non-commented entry of \fBREPO_URLS\fR. Stored in \fB${CACHE_DIR}\fR.
+.SS Search
+.TP
+.B -Ss \fIQUERY\fR
+.RB ( apt :
+.BR "search QUERY" )
+Substring search over the local index.
+.SS Install / remove
+.TP
+.B -S \fIMODULE\fR
+.RB ( apt :
+.BR "install MODULE" )
+Resolve dependencies for \fIMODULE\fR, download (\fIwget\fR), and
+\fIpfsload\fR the result. \fIMODULE\fR may be:
+.RS
+.IP \(bu 2
+A name to look up in the local cache (\fB${CACHE_FILE}\fR), e.g.
+.BR evince .
+.IP \(bu 2
+A path to an existing \fI*.${EXT}\fR file, e.g.
+\fB/mnt/sr0/zz2601/modules/+/openssh-2601.pfs\fR
+or
+.BR ./openssh-2601.pfs .
+A path is detected when the argument contains \fI/\fR, starts with
+.I .
+or
+.IR ~ ,
+points to a real file, and ends in
+.IR .${EXT} .
+Local-path mode skips cache lookup and download \(em dependencies are
+still resolved from \fI${CACHE_DEP}\fR via \fIshort_pkgname\fR.
+.RE
+.TP
+.B -R \fIMODULE\fR
+.RB ( apt :
+.BR "remove MODULE" )
+Find a loaded module that matches \fIMODULE\fR (exact, short-name, or
+prefix) and \fIpfsunload\fR it. Single match is resolved automatically;
+multiple matches print a candidate list and exit non-zero.
+.SS Listing
+.TP
+.B --list-local
+Show files in \fB${DOWNLOAD_DIR}\fR.
+.TP
+.B --list-loaded
+All currently loaded modules. Source: \fIpfsinfo --machine --mount\fR
+with \fI/sys/fs/aufs\fR fallback. In \fB--machine\fR mode each line
+has 6 TAB-separated fields:
+.RS
+.PP
+\fIname\fR<TAB>\fIlayer\fR<TAB>\fIpath\fR<TAB>\fIversion\fR<TAB>\fImount_mode\fR<TAB>\fImount_in_ram\fR
+.PP
+\fImount_mode\fR is currently always empty (reserved for future use).
+\fImount_in_ram\fR is \fByes\fR if the module's backing squashfs lives
+on tmpfs, \fBno\fR otherwise, or empty when unknown.
+.RE
+.TP
+.B --list-loaded-before
+Modules loaded by initrd before system boot. Requires
+\fBAUFS_INITRD_PREFIX\fR to be set or autodetectable
+(\fIsee\fR \fIDEPENDENCY RESOLUTION\fR \fIand\fR \fIINITRD DETECTION\fR
+below).
+.TP
+.B --list-loaded-after
+Modules loaded after system boot.
+.SS Remove local files
+.TP
+.B --remove-local \fINAME\fR [\fINAME\fR ...]
+.RB ( "short:" " " -Rl )
+Delete downloaded \fI*.${EXT}\fR files from \fB${DOWNLOAD_DIR}\fR.
+Variadic: accepts one or more module names separated by spaces.
+Both short name (\fBfoo\fR) and full filename (\fBfoo.pfs\fR) are
+accepted \(em the \fI.${EXT}\fR suffix is stripped automatically.
+.PP
+Before deleting each file, mount status is checked via
+\fIpfsinfo --machine --mount\fR. Mounted modules are rejected (file is
+not deleted) but processing of remaining names continues.
+.PP
+Exit codes (aggregated, variadic mode):
+.RS
+.TP
+.B 0
+All files deleted successfully.
+.TP
+.B 7
+At least one invalid module name.
+.TP
+.B 8
+At least one module rejected (currently mounted).
+.TP
+.B 9
+Other error (file not found, rm failure, permission denied).
+.RE
+.PP
+Machine output format (--machine, TSV):
+.RS
+.TP
+removed\et<name>\et<path>
+File deleted successfully.
+.TP
+error\etmounted\et<name>
+File is mounted \(em rejected.
+.TP
+error\etnot_found\et<name>\et<path>
+File not found.
+.TP
+error\etinvalid_name\et<name>
+Invalid module name.
+.TP
+error\etrm_failed\et<name>
+rm(1) error.
+.RE
+.SS Update management
+.PP
+All update commands operate against the local cache (\fI${CACHE_DIR}/db.txt\fR).
+The update check (\fB--check-updates\fR) never modifies files.
+Applying updates (\fB--update\fR, \fB--update-all\fR) requires root.
+.TP
+.B --check-updates
+Compare installed modules against the repository cache and print a list of
+available updates. \fBDoes not apply updates automatically\fR and \fBdoes not
+modify any file\fR. Safe to run without root. The login-time helper
+(\fBmodman-update-check\fR) uses exactly this command and likewise
+\fBdoes not apply updates automatically\fR.
+.RS
+.PP
+In \fB--machine\fR mode each update line contains 11 TAB-separated fields:
+.PP
+.B update\etid\etname\etold_version\etnew_version\etinstalled_path\etcandidate_filename\etrepo\etrisk\etreboot_required\etmessage
+.PP
+.TS
+tab(@);
+l l.
+\fBField\fR@\fBValue\fR
+update@Row type (literal)
+id@Unique update identifier (for --update <id>)
+name@Short module name (identity)
+old_version@Currently installed version
+new_version@Candidate version in repository
+installed_path@Full path to the installed file
+candidate_filename@Candidate filename in repository
+repo@Source repository URL
+risk@\fBnormal\fR | \fBloaded\fR | \fBsystem\fR
+reboot_required@\fB0\fR or \fB1\fR
+message@Human-readable message (empty or \fBblacklisted\fR)
+.TE
+.PP
+The \fBrisk\fR field:
+.RS
+.TP
+.B normal
+Module is not loaded in the current session.
+.TP
+.B loaded
+Module was loaded after system boot (hot-attached). Update is safe but
+takes effect only after reboot or reconnection.
+.TP
+.B system
+Module was loaded by initrd before system start. Requires
+\fB--confirm-system-updates\fR.
+.RE
+.PP
+The \fBreboot_required\fR field is \fB1\fR when the new module version
+contains changes that require a reboot (e.g. kernel, initrd, base
+libraries). In that case machine output includes an additional line:
+.PP
+.RS
+.B \[u043D]\[u0443]\[u0436]\[u043D]\[u0430] \[u043F]\[u0435]\[u0440]\[u0435]\[u0437]\[u0430]\[u0433]\[u0440]\[u0443]\[u0437]\[u043A]\[u0430]
+.RE
+.PP
+This literal Russian string (\(lqreboot required\(rq) is part of the
+machine contract and appears verbatim in machine output, GUI display,
+and \fIupdate.log\fR. Parsers must match it as a literal.
+.RE
+.TP
+.B --update \fIID\fR
+Apply a single update by identifier \fIID\fR from \fB--check-updates\fR
+output. Downloads the candidate, replaces the installed file, saves a
+backup with suffix \fI.old\fR (or \fI.old.N\fR for multiple backups).
+Writes result to \fIupdate.log\fR.
+.RS
+.PP
+System modules (\fBrisk=system\fR) are rejected with exit code \fB8\fR
+unless \fB--confirm-system-updates\fR is passed.
+.RE
+.TP
+.B --update-all
+Apply all available updates from \fB--check-updates\fR. System modules
+(\fBrisk=system\fR) are skipped without \fB--confirm-system-updates\fR
+\(em they receive a \fBskipped\fR line in machine output but are not
+counted as errors.
+.RS
+.PP
+Exit codes:
+.TP
+.B 0
+All updates applied successfully (skipped system modules are not errors).
+.TP
+.B 1
+At least one update failed (download, rename, mv).
+.RE
+.TP
+.B --confirm-system-updates
+Global flag (like \fB--machine\fR): permits updating modules with
+\fBrisk=system\fR. Without this flag \fB--update\fR exits with code
+\fB8\fR and \fB--update-all\fR skips system modules.
+.RS
+.PP
+.B WARNING:
+updating system modules may require a reboot. Always check the
+\fBreboot_required\fR field before applying.
+.RE
+.TP
+.B --verbose-skips
+Global flag: enables output of \fBskipped\fR lines in machine output for
+modules skipped during \fB--update-all\fR (e.g. incomparable version or
+no candidate). Without this flag skips are silent.
+.RS
+.PP
+Format of a \fBskipped\fR line (4 fields):
+.PP
+.B skipped\etreason\etid\etmessage
+.RE
+.TP
+.B --include-blacklisted
+Global flag: includes blacklisted version entries in \fB--check-updates\fR
+output. Such lines have \fBmessage=blacklisted\fR. Without this flag
+blacklisted versions are silently skipped.
+.TP
+.B --update-blacklist-list
+Print the contents of the update blacklist file. Each line:
+\fBidentity\etversion\fR.
+.TP
+.B --update-blacklist-add \fIID-OR-CANDIDATE\fR
+Add a version to the blacklist. Accepts a full candidate filename
+(\fIfoo-1.1.pfs\fR) or just the identity (\fIfoo\fR) \(em in the latter
+case the cache is searched to determine the latest version.
+.TP
+.B --update-blacklist-remove \fIIDENTITY\fR \fIVERSION\fR
+Remove a specific entry from the blacklist by identity and version.
+.SS Machine output: update lines
+.PP
+In \fB--machine\fR mode the update commands emit the following line types:
+.TP
+.B update\etid\etname\etold_version\etnew_version\etinstalled_path\etcandidate_filename\etrepo\etrisk\etreboot_required\etmessage
+Available update (from \fB--check-updates\fR). 11 fields.
+.TP
+.B applied\etid\etold_path\etnew_path\etbackup_path\etrisk\etreboot_required\etmessage
+Update applied successfully. 8 fields.
+.TP
+.B skipped\etreason\etid\etmessage
+Update skipped (only with \fB--verbose-skips\fR or for system modules
+without \fB--confirm-system-updates\fR). 4 fields.
+.TP
+.B error\etreason\etid\etmessage
+Error applying update. 4 fields.
+.SS Exit codes (update commands)
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Update application error (download, mv, rename).
+.TP
+.B 7
+Invalid argument (module name, id).
+.TP
+.B 8
+System module (\fBrisk=system\fR) without \fB--confirm-system-updates\fR.
+.SS Help
+.TP
+.B -h, --help, help
+Print built-in help. Triggered by no argument as well.
+.SH GLOBAL OPTIONS
+.TP
+.B --machine
+TSV output suitable for parsing. Suppresses colored / human
+\fIprint_msg\fR output but preserves \fIprint_err\fR / \fIfatal_err\fR
+on stderr.
+.TP
+.B -d \fIDIR\fR, --download-dir \fIDIR\fR
+Override
+.B DOWNLOAD_DIR
+for the current invocation. Wins over both \fImodman.conf\fR and
+autodetect (\fIpfs --download-dir\fR). Useful when the autodetected
+directory is read-only (e.g. live ISO mount).
+.TP
+.B --progress-file \fIPATH\fR, --progress-file=\fIPATH\fR
+Sink for machine-readable download progress. Equivalent to setting
+the
+.B MODMAN_PROGRESS_FILE
+environment variable, but survives
+.B pkexec
+privilege escalation (which strips non-whitelisted env vars). Used by
+\fImodman-gui\fR to drive its progress bar. The file is rewritten on
+each tick with three lines: \fIname=<module>\fR, \fIstage=download\fR,
+\fIpct=<0..100>\fR.
+.TP
+.B --lower
+Pass \fI-l\fR to \fIpfsload\fR \(em install module to lower AUFS layer.
+Mutually exclusive with \fB--upper\fR.
+.TP
+.B --upper
+Pass \fI-u\fR to \fIpfsload\fR \(em install module to upper AUFS layer
+(this is \fIpfsload\fR's built-in default).
+.TP
+.B --toram
+Pass \fI-r\fR to \fIpfsload\fR \(em copy module to tmpfs before mounting.
+Combinable with \fB--lower\fR or \fB--upper\fR.
+.TP
+.B --load-cmd \fICMD\fR
+Override \fICMD_LOAD\fR with full command string \fICMD\fR. Word-split
+on whitespace; final argv is \fICMD\fR + module path. Used by GUI
+right-click menu when \fIPFSLOAD_ALLOW_*\fR conf keys provide custom
+commands. NOT compatible with \fB--lower/--upper/--toram\fR.
+.SH SHORT ALIASES
+Short aliases are available for frequently used commands. Behaviour is
+identical to the long form; both forms are accepted in both dialects
+(pacman-style and apt-style).
+.PP
+.TS
+tab(@);
+l l l.
+\fBLong form\fR@\fBShort alias\fR@\fBMnemonic\fR
+--list-loaded@-L@List loaded
+--list-loaded-before@-Lb@List loaded \(em before
+--list-loaded-after@-La@List loaded \(em after
+--list-local@-Ql@Query local
+--remove-local@-Rl@Remove local
+.TE
+.SH DEPENDENCY RESOLUTION
+.SS Source of truth
+Each \fI.pfs\fR module ships a \fIstart.sh\fR script. Maintainer encodes
+dependencies as lines of the form:
+.PP
+.RS
+.B <pkg>-dep <dep1> <dep2> <dep3>
+.RE
+.SS Maintainer side: \fImodman -di\fR
+For every \fI*.${EXT}\fR in the target directory:
+.IP "1." 4
+Extract \fIstart.sh\fR via \fIunsquashfs -cat\fR.
+.IP "2." 4
+Grep regex \fB[a-zA-Z0-9_-]+-dep [ A-Za-z0-9_-]+\fR.
+.IP "3." 4
+Strip the \fB<pkg>-dep\fR prefix; keep the dep list.
+.IP "4." 4
+Append \fBshortname : dep1 dep2 ...\fR to \fI000-dependencies.txt\fR.
+.PP
+mtime cache: if the \fI.pfs\fR is older than the existing
+\fI000-dependencies.txt\fR, the cached entry is reused instead of
+re-running \fIunsquashfs\fR.
+.SS Client side: \fImodman -Sy\fR
+.PP
+.RS
+\fBwget -qO\fR \fI${CACHE_DEP}\fR.tmp \fI<repo_url>/000-dependencies.txt\fR
+.br
+\fBmv\fR \fI${CACHE_DEP}\fR.tmp \fI${CACHE_DEP}\fR
+.RE
+.PP
+A 404 leaves \fI${CACHE_DEP}\fR truncated to empty.
+.SS \fIshort_pkgname\fR normalisation
+The cache key is the \fIshortname\fR \(em the file basename minus
+\fI.${EXT}\fR with the following regex applied:
+.PP
+.RS
+\fBs/(-[0-9].*|_any.*|_64.*|-sf[0-9]+.*|-au[0-9]+.*)//\fR
+.RE
+.PP
+Strips: version (\fI-3.26.0...\fR), arch (\fI_64\fR / \fI_any\fR),
+revision tags (\fI-sf06\fR / \fI-au01\fR).
+.PP
+.TS
+tab(@);
+l l.
+\fBfull name\fR@\fBshortname\fR
+evince-gtk3-p-3.26.0_64-sf06.pfs@evince-gtk3-p
+030-gtk3-2601-sf03.pfs@030-gtk3
+chromium-bin-gtk3-p-1.0_64-sf01.pfs@chromium-bin-gtk3-p
+.TE
+.SS Resolution at \fImodman -S\fR
+.PP
+.RS
+.nf
+shortname=$(short_pkgname "$name")
+deps=$(grep "^$shortname :" "$CACHE_DEP" | cut -d':' -f2- | sed 's/^ *//')
+
+for dep in $deps; do
+    _validate_name "$dep"           # safety: [a-zA-Z0-9._+-]
+    _dep_is_ignored "$dep" && continue
+    "$0" $MACHINE_FLAG -S "$dep"    # recursive subprocess
+done
+.fi
+.RE
+.PP
+Recursion is implemented as fresh
+.B "$0" -S
+subprocess invocations, not internal function calls. Each dep separately
+re-reads the cache, resolves its own deps, downloads and \fIpfsload\fRs.
+.SH INITRD DETECTION
+\fBmodman\fR delegates initrd-aware logic to \fBpfs-utils\fR which uses
+a plugin directory of detector scripts:
+.PP
+.RS
+\fI${INITRD_DETECTORS_DIR}\fR (default
+\fI/usr/local/lib/pfs-utils/initrd-detectors/\fR)
+.RE
+.PP
+Each \fINN-name.sh\fR sources a \fIdetect_<name>()\fR function that
+returns 0 on match and sets globals \fBINITRD_NAME\fR,
+\fBINITRD_LAYERING\fR, \fBINITRD_AUFS_PREFIX\fR,
+\fBINITRD_DOWNLOAD_DIR\fR. The dispatcher iterates files in lex order
+(numeric prefix = precedence) and the first match wins.
+.PP
+Shipped detectors:
+.TS
+tab(@);
+l l l l.
+\fBfile\fR@\fBinitrd\fR@\fBlayering\fR@\fBaufs prefix\fR
+10-uird.sh@uird@overlay@${SYSMNT}/bundles
+20-rootaufs2.sh@rootaufs2@aufs@/run/archroot/live/memory/images
+30-porteus.sh@porteus@aufs@${SYSMNT}/bundles
+40-livekit.sh@livekit@overlay@${SYSMNT}/bundles
+.TE
+.PP
+Adding a new initrd type is a drop-in: place \fI50-yourname.sh\fR with
+the contract described above; no edits to the \fIpfs\fR library are
+needed.
+.SH AUTODETECT FALLBACK
+\fBmodman\fR uses the following resolution order for the
+initrd-derived knobs:
+.IP "1." 4
+\fBconfig\fR \(em value set in \fImodman.conf\fR(5).
+.IP "2." 4
+\fBCLI override\fR \(em \fB-d\fR for \fBDOWNLOAD_DIR\fR.
+.IP "3." 4
+\fBautodetect\fR \(em shell out to \fIpfs --aufs-initrd-prefix\fR or
+\fIpfs --download-dir\fR.
+.PP
+If autodetect fails (no detector matches or \fIdir=\fR absent in
+\fI/proc/cmdline\fR), the value stays empty. Commands that actually
+consume the missing var print a clear stderr error and \fBexit 1\fR;
+unrelated commands (\fI--help\fR, \fI--list-local\fR with explicit
+\fBDOWNLOAD_DIR\fR, \fI--list-loaded\fR without filter) keep working.
+.SH CONFIGURATION
+The following keys are read from \fImodman.conf\fR(5). They control the
+right-click context menu in \fBmodman-gui\fR and the \fB--load-cmd\fR
+CLI option.
+.TP
+.B PFSLOAD_ALLOW_LOWER
+Right-click menu command for "Load to lower layer". String value
+holds full command (e.g. \fIpfsload -l\fR). Empty/absent \(-> menu item hidden.
+.TP
+.B PFSLOAD_ALLOW_TORAM
+Right-click menu command for "Load to RAM" (e.g. \fIpfsload -r\fR).
+.TP
+.B PFSLOAD_ALLOW_LOWER_TORAM
+Right-click menu command for "lower layer + RAM" (e.g. \fIpfsload -l -r\fR).
+.TP
+.B PFSLOAD_ALLOW_UPPER_TORAM
+Right-click menu command for "upper layer + RAM" (e.g. \fIpfsload -u -r\fR).
+.SH EXAMPLES
+.SS Plain install
+.PP
+.RS
+.nf
+sudo modman -S evince
+.fi
+.RE
+.SS Skip pre-bundled deps
+\fImodman.conf\fR:
+.PP
+.RS
+\fBMODMAN_IGNORE_DEPS="030-gtk3"\fR
+.RE
+.PP
+modman skips \fB030-gtk3\fR with an info message instead of recursing
+into install.
+.SS Override download dir (autodetect path is read-only)
+.PP
+.RS
+.nf
+sudo modman -d /tmp/modman-cache -S evince
+.fi
+.RE
+.SS Install local file
+.PP
+.RS
+.nf
+sudo modman -S /mnt/sr0/zz2601/modules/+/openssh-2601.pfs
+sudo modman -S ./openssh-2601.pfs
+.fi
+.RE
+.SS Remove by short name
+.PP
+.RS
+.nf
+sudo modman -R evince
+.fi
+.RE
+\fBmodman\fR resolves \fBevince\fR to the loaded
+\fBevince-gtk3-p-3.26.0_64-sf06\fR via \fIpfsinfo --machine --mount\fR.
+.SS Machine-readable listing for downstream parsers
+.PP
+.RS
+.nf
+modman --machine --list-loaded-before
+.fi
+.RE
+.SS Remove local file
+.PP
+.RS
+.nf
+modman --remove-local evince
+modman -Rl evince evince-gtk3-p
+.fi
+.RE
+.SS Check for updates (safe, no root needed)
+.PP
+.RS
+.nf
+modman --machine --check-updates
+.fi
+.RE
+.SS Apply a single update
+.PP
+.RS
+.nf
+sudo modman --update <id>
+.fi
+.RE
+.SS Apply all updates, including system modules
+.PP
+.RS
+.nf
+sudo modman --update-all --confirm-system-updates
+.fi
+.RE
+.SH CAVEATS
+.SS Dependency cycles
+A circular dep graph (A \(-> B \(-> A) causes infinite recursion. There
+is no
+.B visited
+set; the operator must avoid such graphs at \fI-di\fR generation time.
+.SS Diamond dependencies
+A \(-> B, A \(-> C, B \(-> C results in C being installed twice. There is
+no memoisation across the recursive subprocess tree.
+.SS No version constraints
+\fI<pkg>-dep\fR lines list dep
+.B names
+only. There is no SemVer-style \fB>=1.0\fR; whichever version is in the
+cache wins.
+.SS No topological sort
+Dependencies are processed in the order extracted by the regex; pre-order
+tree expansion. Parallel install is not supported.
+.SS Already-loaded deps
+A dep that is already \fIpfsload\fR-ed is still re-installed
+unconditionally. \fIpfsload\fR may report an error or a no-op depending
+on the layering mode.
+.SS Dep missing from cache
+If \fImodman -S dep\fR fails because the dep is not present in
+\fI${CACHE_FILE}\fR, the parent install continues with the next dep
+(loop iteration).
+.B MODMAN_IGNORE_DEPS
+is the recommended way to silence such cases when the dep is bundled
+into a base module.
+.SH FILES
+.TP
+.I /etc/modman.conf
+System-wide configuration. See \fImodman.conf\fR(5).
+.TP
+.I ~/.config/modman/modman.conf
+Per-user override.
+.TP
+.I ${CACHE_DIR}/db.txt
+Local cache of \fI000-index.txt\fR (default \fI/var/cache/modman/db.txt\fR).
+.TP
+.I ${CACHE_DIR}/dependencies.txt
+Local cache of \fI000-dependencies.txt\fR.
+.TP
+.I ${DOWNLOAD_DIR}
+Where downloaded \fI*.${EXT}\fR files land. Default for rootaufs2 is
+autodetected as \fI/mnt/home/${dir}/optional\fR.
+.TP
+.I /usr/local/lib/pfs-utils/initrd-detectors/
+Plugin directory for initrd detector scripts (provided by
+\fBpfs-utils-cli\fR).
+.SH SEE ALSO
+.BR modman.conf (5),
+.BR pfs-utils (8),
+.BR pfs (8),
+.BR pfsload (8),
+.BR pfsunload (8),
+.BR pfsinfo (8),
+.BR pfsbench (8),
+.BR pfsexec (8),
+.BR pfsactivate (8),
+.BR pfsdeactivate (8)
+.PP
+ADRs:
+.IR docs/adr/0001-layering-dispatch.md ,
+.IR docs/adr/0002-v4-backward-compat.md

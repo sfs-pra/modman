@@ -1,0 +1,949 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: modman 2026.05\n"
+"Report-Msgid-Bugs-To:\n"
+"POT-Creation-Date: 2026-05-06 00:00+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: src/main.c:87
+msgid "Usage: %s [OPTIONS] [MODULE-NAME-PART]\\n\\n"
+msgstr ""
+
+#: src/main.c:88
+msgid "Open the modman GTK interface. If a module name fragment is provided, the window opens on the Online tab with that filter.\\n\\n"
+msgstr ""
+
+#: src/main.c:89
+msgid "Options:\\n"
+msgstr ""
+
+#: src/main.c:90
+msgid "  -h, --help          Show this help\\n"
+msgstr ""
+
+#: src/main.c:91
+msgid "  -V, --version       Show version\\n"
+msgstr ""
+
+#: src/main.c:92
+msgid "      --dump-widgets  Print widget tree and exit\\n"
+msgstr ""
+
+#: src/ui.c:488
+msgid "Clean up old modules"
+msgstr ""
+
+#: src/ui.c:491
+#: src/ui.c:6064
+msgid "_Cancel"
+msgstr ""
+
+#: src/ui.c:493
+msgid "_Remove Selected"
+msgstr ""
+
+#: src/ui.c:497
+msgid "Select .pfs.old files to remove:"
+msgstr ""
+
+msgid "Select files to remove."
+msgstr ""
+
+#: src/ui.c:561
+msgid "Failed to remove selected .pfs.old files."
+msgstr ""
+
+#: src/ui.c:576
+msgid "Removed 1 file"
+msgstr ""
+
+#: src/ui.c:578
+msgid "Removed %u files"
+msgstr ""
+
+#: src/ui.c:582
+msgid "Failed to remove %u files"
+msgstr ""
+
+msgid "No files were removed."
+msgstr ""
+
+msgid "squashfs %s"
+msgstr ""
+
+msgid "squashfs %s %s"
+msgstr ""
+
+msgid "erofs %s"
+msgstr ""
+
+msgid "Загрузка обновления…"
+msgstr ""
+
+#: src/ui.c:592
+msgid "Operation completed."
+msgstr ""
+
+#: src/ui.c:1157
+msgid "Downloading"
+msgstr ""
+
+#: src/ui.c:1157
+msgid "Processing"
+msgstr ""
+
+#: src/ui.c:1548
+msgid "Busy processes"
+msgstr ""
+
+#: src/ui.c:1551
+#: src/ui.c:1660
+msgid "_Close"
+msgstr ""
+
+#: src/ui.c:1555
+msgid "_Terminate Selected"
+msgstr ""
+
+#: src/ui.c:1563
+msgid "Could not determine the module mount point or find processes by name. Close programs using module files and retry unloading."
+msgstr ""
+
+#: src/ui.c:1564
+msgid "No busy processes found. Close programs that may have opened module files and retry unloading."
+msgstr ""
+
+#: src/ui.c:1573
+msgid "Select programs to terminate:"
+msgstr ""
+
+#: src/ui.c:1640
+#: src/ui.c:1703
+#: src/ui.c:2959
+msgid "unnamed"
+msgstr ""
+
+#: src/ui.c:1645
+msgid "Failed to detach module “%s”"
+msgstr ""
+
+#: src/ui.c:1647
+msgid "Module files may be busy in running programs. Close those programs or terminate them here, then retry unloading."
+msgstr ""
+
+#: src/ui.c:1650
+#: src/ui.c:1713
+msgid "The backend did not return a detailed error message."
+msgstr ""
+
+#: src/ui.c:1665
+msgid "_Terminate Processes…"
+msgstr ""
+
+#: src/ui.c:1678
+msgid "Detach failed."
+msgstr ""
+
+#: src/ui.c:1708
+msgid "Failed to attach module “%s”"
+msgstr ""
+
+#: src/ui.c:1709
+msgid "Target: %s\\n\\n%s"
+msgstr ""
+
+#: src/ui.c:1726
+msgid "Attach failed."
+msgstr ""
+
+#: src/ui.c:1768
+msgid "• modman was not found in PATH or MODMAN_BIN. Install modman.\\n"
+msgstr ""
+
+#: src/ui.c:1771
+msgid "• pfsinfo was not found — showing safe mode only.\\n"
+msgstr ""
+
+#: src/ui.c:1774
+msgid "• AUFS and OverlayFS were not detected — attach/detach operations are disabled.\\n"
+msgstr ""
+
+#: src/ui.c:1778
+msgid "<b>Limited mode</b>\\n%s"
+msgstr ""
+
+#: src/ui.c:1791
+msgid "pkexec was not found — privileged actions are unavailable."
+msgstr ""
+
+#: src/ui.c:1800
+msgid "AUFS and OverlayFS were not detected — attaching and detaching modules is unavailable."
+msgstr ""
+
+#: src/ui.c:1809
+msgid "systemd was not detected: module autoload management is disabled."
+msgstr ""
+
+#: src/ui.c:1818
+#: src/ui.c:5909
+msgid "OverlayFS: attached modules are visible only to new processes."
+msgstr ""
+
+#: src/ui.c:2159
+msgid "⚠  Confirm dangerous action?"
+msgstr ""
+
+#: src/ui.c:2162
+msgid "This operation may affect the running system. Continue?"
+msgstr ""
+
+#: src/ui.c:2165
+msgid "_Continue"
+msgstr ""
+
+#: src/ui.c:2182
+msgid "Cancel"
+msgstr ""
+
+#: src/ui.c:2193
+msgid "Cancel dangerous action"
+msgstr ""
+
+#: src/ui.c:2194
+msgid "Close the warning and do not perform the action."
+msgstr ""
+
+#: src/ui.c:2198
+msgid "Confirm action"
+msgstr ""
+
+#: src/ui.c:2200
+msgid "Confirm the dangerous action. %s"
+msgstr ""
+
+#: src/ui.c:2534
+#: src/ui.c:2688
+#: src/ui.c:2996
+msgid "_Authorize"
+msgstr ""
+
+#: src/ui.c:2534
+#: src/ui.c:2600
+#: src/ui.c:2680
+msgid "_Retry"
+msgstr ""
+
+#: src/ui.c:2552
+#: src/ui.c:2611
+#: src/ui.c:6844
+msgid "Done."
+msgstr ""
+
+#: src/ui.c:2666
+msgid "Catalog cache is empty — syncing with mirrors…"
+msgstr ""
+
+#: src/ui.c:2676
+msgid "Failed to refresh the online module catalog. Check your connection and try again."
+msgstr ""
+
+#: src/ui.c:2719
+msgid "Online catalog refreshed."
+msgstr ""
+
+#: src/ui.c:2720
+#: src/ui.c:5203
+msgid "Online catalog loaded."
+msgstr ""
+
+#: src/ui.c:2958
+msgid "Another attached module depends on “%s”.\\n\\nDetaching it may break dependent components. Continue?"
+msgstr ""
+
+#: src/ui.c:2962
+msgid "⚠  Detach dependent module?"
+msgstr ""
+
+#: src/ui.c:2964
+#: src/ui.c:5340
+msgid "_Detach"
+msgstr ""
+
+#: src/ui.c:2992
+msgid "Root privileges are required for pfsload. Retry after authorization."
+msgstr ""
+
+#: src/ui.c:3018
+msgid "The backend completed detach without a result."
+msgstr ""
+
+#: src/ui.c:3024
+msgid "The operation completed without a result."
+msgstr ""
+
+#: src/ui.c:3035
+msgid "detached"
+msgstr ""
+
+#: src/ui.c:3035
+msgid "attached"
+msgstr ""
+
+#: src/ui.c:3037
+msgid "✓ Module “%s” %s"
+msgstr ""
+
+#: src/ui.c:3062
+msgid "Loaded: %u of %u. Errors: %s"
+msgstr ""
+
+#: src/ui.c:3067
+msgid "✓ Modules loaded: %u"
+msgstr ""
+
+#: src/ui.c:3101
+msgid "Loading module %u of %u: “%s”…"
+msgstr ""
+
+#: src/ui.c:3142
+msgid "error"
+msgstr ""
+
+#: src/ui.c:3252
+msgid "Removed: %s"
+msgstr ""
+
+#: src/ui.c:3258
+msgid "Refused (mounted): %s"
+msgstr ""
+
+#: src/ui.c:3264
+msgid "Error: %s"
+msgstr ""
+
+#: src/ui.c:3268
+msgid "Removal completed."
+msgstr ""
+
+#: src/ui.c:3269
+msgid "Removal made no changes."
+msgstr ""
+
+#: src/ui.c:3294
+msgid "Connected"
+msgstr ""
+
+#: src/ui.c:3294
+msgid "Connected modules"
+msgstr ""
+
+#: src/ui.c:3294
+msgid "Modules attached after system startup will appear here."
+msgstr ""
+
+#: src/ui.c:3295
+msgid "Online"
+msgstr ""
+
+#: src/ui.c:3295
+msgid "Module catalog"
+msgstr ""
+
+#: src/ui.c:3295
+msgid "Search results and available updates will appear here."
+msgstr ""
+
+#: src/ui.c:3296
+msgid "Local"
+msgstr ""
+
+#: src/ui.c:3296
+msgid "Local storage"
+msgstr ""
+
+#: src/ui.c:3296
+msgid "Local modules will be shown here after the catalog is reloaded."
+msgstr ""
+
+#: src/ui.c:3297
+msgid "System"
+msgstr ""
+
+#: src/ui.c:3297
+msgid "System modules"
+msgstr ""
+
+#: src/ui.c:3297
+msgid "Base modules attached by initrd will appear here."
+msgstr ""
+
+#: src/ui.c:3335
+msgid "Attached after system startup."
+msgstr ""
+
+#: src/ui.c:3339
+msgid "Online repository."
+msgstr ""
+
+#: src/ui.c:3343
+msgid "Local modules."
+msgstr ""
+
+#: src/ui.c:3347
+msgid "Attached before system startup."
+msgstr ""
+
+#: src/ui.c:3395
+msgid "Tab %s"
+msgstr ""
+
+#: src/ui.c:3610
+msgid "File removal is available only on the Local tab."
+msgstr ""
+
+#: src/ui.c:3612
+msgid "Select one or more local modules to remove."
+msgstr ""
+
+#: src/ui.c:3614
+msgid "Mounted modules cannot be removed: detach selected files first."
+msgstr ""
+
+#: src/ui.c:3616
+msgid "File removal is unavailable: the modman backend is currently unavailable."
+msgstr ""
+
+#: src/ui.c:3619
+msgid "Remove selected .pfs files from the download directory"
+msgstr ""
+
+#: src/ui.c:3806
+msgid "Loaded (RAM)"
+msgstr ""
+
+#: src/ui.c:3817
+#: src/ui.c:3846
+msgid "regular module"
+msgstr ""
+
+#: src/ui.c:3821
+msgid "last operation failed"
+msgstr ""
+
+#: src/ui.c:3825
+msgid "update available"
+msgstr ""
+
+#: src/ui.c:3829
+msgid "autoload enabled"
+msgstr ""
+
+#: src/ui.c:3839
+msgid "module loaded"
+msgstr ""
+
+#: src/ui.c:3843
+msgid "local only"
+msgstr ""
+
+#: src/ui.c:3866
+msgid "module from online catalog"
+msgstr ""
+
+#: src/ui.c:3869
+msgid "local module"
+msgstr ""
+
+#: src/ui.c:3888
+#: src/ui.c:3950
+msgid "Status: %s"
+msgstr ""
+
+#: src/ui.c:3889
+msgid "Selected module status indicator: %s"
+msgstr ""
+
+#: src/ui.c:3951
+msgid "Module section indicator: %s"
+msgstr ""
+
+#: src/ui.c:3976
+#: src/ui.c:4910
+#: src/ui.c:5002
+msgid "Unnamed module"
+msgstr ""
+
+#: src/ui.c:3994
+#: src/ui.c:4912
+#: src/ui.c:5000
+msgid "no description"
+msgstr ""
+
+#: src/ui.c:4181
+msgid "Value"
+msgstr ""
+
+#: src/ui.c:4212
+msgid "Field “%s” value: %s"
+msgstr ""
+
+#: src/ui.c:4215
+msgid "Text value: %s"
+msgstr ""
+
+#: src/ui.c:4291
+msgid "Field “%s” caption in the details pane."
+msgstr ""
+
+#: src/ui.c:4353
+msgid "None"
+msgstr ""
+
+#: src/ui.c:4404
+msgid "Install modman"
+msgstr ""
+
+#: src/ui.c:4427
+msgid "Loading…"
+msgstr ""
+
+#: src/ui.c:4458
+msgid "Selected module"
+msgstr ""
+
+#: src/ui.c:4470
+msgid "Status:"
+msgstr ""
+
+#: src/ui.c:4473
+#: src/ui.c:4485
+msgid "Status"
+msgstr ""
+
+#: src/ui.c:4474
+msgid "Caption for the selected module current status."
+msgstr ""
+
+#: src/ui.c:4494
+msgid "Version:"
+msgstr ""
+
+#: src/ui.c:4503
+msgid "Size:"
+msgstr ""
+
+#: src/ui.c:4512
+msgid "Directory:"
+msgstr ""
+
+#: src/ui.c:4522
+msgid "Repository:"
+msgstr ""
+
+#: src/ui.c:4536
+msgid "Description:"
+msgstr ""
+
+#: src/ui.c:4547
+msgid "Dependencies:"
+msgstr ""
+
+#: src/ui.c:4559
+msgid "Details pane for the “%s” section. It shows properties of the selected module."
+msgstr ""
+
+#: src/ui.c:4560
+msgid "modules"
+msgstr ""
+
+#: src/ui.c:4562
+msgid "Details pane"
+msgstr ""
+
+#: src/ui.c:4616
+msgid "Module section"
+msgstr ""
+
+#: src/ui.c:4622
+msgid "Section “%s”, modules: %u"
+msgstr ""
+
+#: src/ui.c:4625
+msgid "Section “%s”"
+msgstr ""
+
+#: src/ui.c:4634
+msgid "Module section."
+msgstr ""
+
+#: src/ui.c:4640
+msgid "%s. %s There are currently %u modules in the list."
+msgstr ""
+
+#: src/ui.c:4808
+msgid "erofs-utils is not installed"
+msgstr ""
+
+#: src/ui.c:4909
+#: src/ui.c:5001
+msgid "Module %s, %s"
+msgstr ""
+
+#: src/ui.c:5007
+msgid "no category"
+msgstr ""
+
+#: src/ui.c:5008
+msgid "Description: %s. Category: %s. Size or layer: %s."
+msgstr ""
+
+#: src/ui.c:5124
+msgid "modman was not found: list refresh is unavailable. Install modman."
+msgstr ""
+
+#: src/ui.c:5224
+msgid "Loading online catalog…"
+msgstr ""
+
+#: src/ui.c:5225
+msgid "Searching online catalog…"
+msgstr ""
+
+#: src/ui.c:5304
+msgid "Failed to prepare attach operation."
+msgstr ""
+
+#: src/ui.c:5320
+msgid "Select a module in the list first."
+msgstr ""
+
+#: src/ui.c:5327
+#: src/ui.c:5534
+msgid "Attach/detach operations are unavailable: critical environment capabilities are missing."
+msgstr ""
+
+#: src/ui.c:5335
+msgid "Module “%s” was attached by initrd and is actively used by the session.\\n\\nDetaching it may stop the window manager. Continue?"
+msgstr ""
+
+#: src/ui.c:5338
+msgid "⚠  Detach system module?"
+msgstr ""
+
+#: src/ui.c:5350
+#: src/ui.c:5544
+msgid "Failed to prepare operation."
+msgstr ""
+
+#: src/ui.c:5364
+#: src/ui.c:5552
+msgid "Loading module “%s”…"
+msgstr ""
+
+#: src/ui.c:5376
+msgid "Failed to prepare local module."
+msgstr ""
+
+#: src/ui.c:5596
+msgid "Attach to upper layer"
+msgstr ""
+
+#: src/ui.c:5605
+msgid "Attach to lower layer (pfsload -l)"
+msgstr ""
+
+#: src/ui.c:5616
+msgid "Attach to RAM (pfsload -r)"
+msgstr ""
+
+#: src/ui.c:5627
+msgid "Attach to lower layer + RAM"
+msgstr ""
+
+#: src/ui.c:5638
+msgid "Attach to upper layer + RAM"
+msgstr ""
+
+#: src/ui.c:5650
+msgid "Copy name"
+msgstr ""
+
+#: src/ui.c:5806
+msgid "Removing %u module…"
+msgstr ""
+
+#: src/ui.c:5807
+msgid "Removing %u modules…"
+msgstr ""
+
+#: src/ui.c:5817
+msgid "Failed to prepare removal."
+msgstr ""
+
+#: src/ui.c:5860
+msgid "An update is available for the selected module."
+msgstr ""
+
+#: src/ui.c:5861
+msgid "_Refresh"
+msgstr ""
+
+#: src/ui.c:6010
+msgid "modman was not found: catalog refresh is unavailable."
+msgstr ""
+
+#: src/ui.c:6016
+msgid "Syncing online catalog…"
+msgstr ""
+
+#: src/ui.c:6026
+msgid "Refreshing current tab…"
+msgstr ""
+
+#: src/ui.c:6054
+msgid "Module attachment is unavailable: critical environment capabilities are missing."
+msgstr ""
+
+#: src/ui.c:6061
+#: src/ui.c:6744
+msgid "Attach local module"
+msgstr ""
+
+#: src/ui.c:6066
+msgid "_Attach"
+msgstr ""
+
+#: src/ui.c:6070
+msgid "PFS modules (*.pfs)"
+msgstr ""
+
+#: src/ui.c:6092
+msgid "Loading selected module…"
+msgstr ""
+
+#: src/ui.c:6216
+#: src/ui.c:6726
+msgid "Name"
+msgstr ""
+
+#: src/ui.c:6217
+#: src/ui.c:6727
+msgid "Size"
+msgstr ""
+
+#: src/ui.c:6219
+#: src/ui.c:6728
+msgid "Layer"
+msgstr ""
+
+#: src/ui.c:6263
+msgid ""
+"GTK3 module manager interface for frugal systems.\n"
+"\n"
+"Keyboard shortcuts:\n"
+"F5 — refresh current section\n"
+"Ctrl+F — focus search\n"
+"Ctrl+Return — perform the primary action\n"
+"Delete — detach module or remove local file\n"
+"Ctrl+I — open this window\n"
+"Ctrl+Q — close window\n"
+"Esc — clear search or close dialog\n"
+"Alt+1..4 — switch sections"
+msgstr ""
+
+#: src/ui.c:6531
+msgid "Failed to start pkexec to open /etc/modman.conf."
+msgstr ""
+
+#: src/ui.c:6578
+msgid "Section is empty."
+msgstr ""
+
+#: src/ui.c:6580
+msgid "Install modman to work with modules."
+msgstr ""
+
+#: src/ui.c:6710
+#: src/ui.c:6713
+msgid "Search modules"
+msgstr ""
+
+#: src/ui.c:6714
+msgid "Search the current tab."
+msgstr ""
+
+#: src/ui.c:6716
+msgid "Search the current tab. Ctrl+F focuses, Esc clears."
+msgstr ""
+
+#: src/ui.c:6730
+msgid "List sorting: name, size, or layer."
+msgstr ""
+
+#: src/ui.c:6735
+msgid "Module…"
+msgstr ""
+
+#: src/ui.c:6741
+#: src/ui.c:6745
+msgid "Choose a local .pfs file on this computer and attach it."
+msgstr ""
+
+#: src/ui.c:6751
+msgid "Open /etc/modman.conf through xdg-open with root privileges."
+msgstr ""
+
+#: src/ui.c:6754
+msgid "Open modman configuration"
+msgstr ""
+
+#: src/ui.c:6755
+msgid "Open /etc/modman.conf through xdg-open."
+msgstr ""
+
+#: src/ui.c:6756
+msgid "Compact"
+msgstr ""
+
+#: src/ui.c:6758
+msgid "Compact module list"
+msgstr ""
+
+#: src/ui.c:6761
+msgid "Compact list"
+msgstr ""
+
+#: src/ui.c:6762
+msgid "Toggle module list density."
+msgstr ""
+
+#: src/ui.c:6782
+#: src/ui.c:6790
+msgid "Status messages will appear here."
+msgstr ""
+
+#: src/ui.c:6789
+msgid "Status message"
+msgstr ""
+
+#: src/ui.c:6793
+msgid "Status message text"
+msgstr ""
+
+#: src/ui.c:6794
+msgid "Text of the last status message."
+msgstr ""
+
+#: src/ui.c:6859
+msgid "Operation progress"
+msgstr ""
+
+#: src/ui.c:6860
+msgid "Shows progress of the current attach or detach operation."
+msgstr ""
+
+#: src/ui.c:6872
+#: src/ui.c:6885
+msgid "About"
+msgstr ""
+
+#: src/ui.c:6886
+msgid "Show information about modman."
+msgstr ""
+
+#: src/ui.c:6895
+msgid "Refresh"
+msgstr ""
+
+#: src/ui.c:6901
+msgid "Reload the current tab. F5."
+msgstr ""
+
+#: src/ui.c:6910
+msgid "Refresh list"
+msgstr ""
+
+#: src/ui.c:6911
+msgid "Reload the current list without changing tabs."
+msgstr ""
+
+#: src/ui.c:6915
+msgid "Attach"
+msgstr ""
+
+#: src/ui.c:6922
+msgid "Attach selected modules."
+msgstr ""
+
+#: src/ui.c:6925
+msgid "Attach selected module"
+msgstr ""
+
+#: src/ui.c:6926
+msgid "Attach the selected module to the current session."
+msgstr ""
+
+#: src/ui.c:6930
+msgid "Detach"
+msgstr ""
+
+#: src/ui.c:6937
+msgid "Detach selected modules."
+msgstr ""
+
+#: src/ui.c:6940
+msgid "Detach selected module"
+msgstr ""
+
+#: src/ui.c:6941
+msgid "Detach the selected module from the current session."
+msgstr ""
+
+#: src/ui.c:6945
+msgid "Remove"
+msgstr ""
+
+#: src/ui.c:6952
+msgid "Remove selected local .pfs files."
+msgstr ""
+
+#: src/ui.c:6956
+msgid "Remove selected files"
+msgstr ""
+
+#: src/ui.c:6957
+msgid "Remove selected local .pfs files from the download directory."
+msgstr ""
+
+#: src/ui.c:6962
+msgid "Clean Up"
+msgstr ""
+
+#: src/ui.c:6969
+msgid "Remove old module versions."
+msgstr ""
+
+#: src/ui.c:6972
+msgid "Clean up old files"
+msgstr ""
+
+#: src/ui.c:6973
+msgid "Remove obsolete files from the download directory."
+msgstr ""
+
+#: src/ui.c:6981
+msgid "Close the window. Ctrl+Q."
+msgstr ""
+
+#: src/ui.c:6990
+msgid "Exit"
+msgstr ""
+
+#: src/ui.c:6991
+msgid "Close the modman window."
+msgstr ""

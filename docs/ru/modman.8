@@ -1,0 +1,652 @@
+.TH MODMAN 8 "2026-05-05" "modman" "Системное администрирование"
+.SH NAME
+modman \- менеджер pfs-модулей (CLI-бэкенд для PuppyRus / rootaufs2 систем)
+.SH SYNOPSIS
+.B modman
+[\fB--machine\fR]
+[\fB-d\fR \fIDIR\fR | \fB--download-dir\fR \fIDIR\fR]
+[\fB--progress-file\fR \fIPATH\fR]
+[\fB--lower\fR | \fB--upper\fR | \fB--toram\fR]
+[\fB--load-cmd\fR \fICMD\fR]
+\fICOMMAND\fR
+[\fIARGS\fR]
+.PP
+.B modman
+[\fB--machine\fR]
+\fB--remove-local\fR|\fB-Rl\fR
+\fINAME\fR [\fINAME\fR ...]
+.PP
+.B modman -h
+|
+.B --help
+.SH DESCRIPTION
+\fBmodman\fR — CLI-бэкенд, управляющий обнаружением, загрузкой,
+разрешением зависимостей, установкой (\fIpfsload\fR) и удалением
+(\fIpfsunload\fR) pfs-контейнерных модулей. Файловые операции делегируются
+\fBpfs-utils\fR (\fIpfs\fR(8), \fIpfsload\fR, \fIpfsunload\fR,
+\fIpfsinfo\fR, \fIpfsbench\fR); конфигурация читается из
+\fImodman.conf\fR(5).
+.PP
+modman поддерживает два диалекта CLI, переключаемых ключом \fBCLI_STYLE\fR:
+\fIpacman\fR-стиль (\fB-S\fR, \fB-R\fR, \fB-Sy\fR, \fB-Ss\fR \(em по
+умолчанию) и \fIapt\fR-стиль (\fBinstall\fR, \fBremove\fR, \fBupdate\fR,
+\fBsearch\fR).
+.SH COMMANDS
+.SS Обслуживание / обнаружение
+.TP
+.B -mi \fIDIR\fR
+Сгенерировать \fI000-index.txt\fR в \fIDIR\fR. Только для мейнтейнеров.
+.TP
+.B -di \fIDIR\fR
+Сгенерировать \fI000-dependencies.txt\fR в \fIDIR\fR путём извлечения
+\fIstart.sh\fR из каждого \fI*.${EXT}\fR (по умолчанию \fI.pfs\fR) и
+разбора строк \fB<pkg>-dep\fR. Только для мейнтейнеров.
+.SS Синхронизация кэша
+.TP
+.B -Sy
+.RB ( apt :
+.BR update )
+Загрузить \fI000-index.txt\fR и \fI000-dependencies.txt\fR из первой
+незакомментированной записи \fBREPO_URLS\fR. Сохраняется в \fB${CACHE_DIR}\fR.
+.SS Поиск
+.TP
+.B -Ss \fIQUERY\fR
+.RB ( apt :
+.BR "search QUERY" )
+Поиск подстроки в локальном индексе.
+.SS Установка / удаление
+.TP
+.B -S \fIMODULE\fR
+.RB ( apt :
+.BR "install MODULE" )
+Разрешить зависимости \fIMODULE\fR, скачать (\fIwget\fR) и
+\fIpfsload\fR результат. \fIMODULE\fR может быть:
+.RS
+.IP \(bu 2
+Именем для поиска в локальном кэше (\fB${CACHE_FILE}\fR), например
+.BR evince .
+.IP \(bu 2
+Путём к существующему файлу \fI*.${EXT}\fR, например
+\fB/mnt/sr0/zz2601/modules/+/openssh-2601.pfs\fR
+или
+.BR ./openssh-2601.pfs .
+Путь определяется, когда аргумент содержит \fI/\fR, начинается с
+.I .
+или
+.IR ~ ,
+указывает на реальный файл и заканчивается на
+.IR .${EXT} .
+В режиме локального пути поиск в кэше и загрузка пропускаются \(em
+зависимости по-прежнему разрешаются из \fI${CACHE_DEP}\fR через
+\fIshort_pkgname\fR.
+.RE
+.TP
+.B -R \fIMODULE\fR
+.RB ( apt :
+.BR "remove MODULE" )
+Найти загруженный модуль, соответствующий \fIMODULE\fR (точное совпадение,
+короткое имя или префикс), и выполнить \fIpfsunload\fR. Единственное
+совпадение разрешается автоматически; несколько совпадений выводят список
+кандидатов и завершаются с ненулевым кодом.
+.SS Листинг
+.TP
+.B --list-local
+Показать файлы в \fB${DOWNLOAD_DIR}\fR.
+.TP
+.B --list-loaded
+Все загруженные в данный момент модули. Источник: \fIpfsinfo --machine --mount\fR
+с fallback на \fI/sys/fs/aufs\fR. В режиме \fB--machine\fR каждая строка
+содержит 6 TAB-разделённых полей:
+.RS
+.PP
+\fIname\fR<TAB>\fIlayer\fR<TAB>\fIpath\fR<TAB>\fIversion\fR<TAB>\fImount_mode\fR<TAB>\fImount_in_ram\fR
+.PP
+\fImount_mode\fR в настоящее время всегда пустой (зарезервировано).
+\fImount_in_ram\fR равно \fByes\fR, если backing squashfs модуля находится
+на tmpfs, \fBno\fR в противном случае, или пустое, если неизвестно.
+.RE
+.TP
+.B --list-loaded-before
+Модули, загруженные initrd до старта системы. Требует, чтобы
+\fBAUFS_INITRD_PREFIX\fR был задан или автоопределён
+(\fIsee\fR \fIDEPENDENCY RESOLUTION\fR \fIand\fR \fIINITRD DETECTION\fR
+ниже).
+.TP
+.B --list-loaded-after
+Модули, загруженные после старта системы.
+.SS Удаление локальных файлов
+.TP
+.B --remove-local \fINAME\fR [\fINAME\fR ...]
+.RB ( "short:" " " -Rl )
+Удалить скачанные \fI*.${EXT}\fR файлы из \fB${DOWNLOAD_DIR}\fR.
+Вариативный: принимает одно или несколько имён модулей через пробел.
+Принимается как короткое имя (\fBfoo\fR), так и полное имя файла
+(\fBfoo.pfs\fR) \(em суффикс \fI.${EXT}\fR отбрасывается автоматически.
+.PP
+Перед удалением каждого файла выполняется проверка смонтированности
+через \fIpfsinfo --machine --mount\fR. Смонтированные модули
+отклоняются (файл не удаляется), но обработка остальных продолжается.
+.PP
+Коды выхода (агрегированные, вариативный режим):
+.RS
+.TP
+.B 0
+Все файлы успешно удалены.
+.TP
+.B 7
+Хотя бы одно невалидное имя модуля.
+.TP
+.B 8
+Хотя бы один модуль отклонён (смонтирован).
+.TP
+.B 9
+Другая ошибка (файл не найден, ошибка rm, права доступа).
+.RE
+.PP
+Машинный формат вывода (--machine, TSV):
+.RS
+.TP
+removed\et<имя>\et<путь>
+Файл успешно удалён.
+.TP
+error\etmounted\et<имя>
+Файл смонтирован \(em отклонён.
+.TP
+error\etnot_found\et<имя>\et<путь>
+Файл не найден.
+.TP
+error\etinvalid_name\et<имя>
+Невалидное имя модуля.
+.TP
+error\etrm_failed\et<имя>
+Ошибка rm(1).
+.RE
+.SS Управление обновлениями
+.PP
+Все команды обновления работают через локальный кэш (\fI${CACHE_DIR}/db.txt\fR).
+Проверка обновлений (\fB--check-updates\fR) никогда не изменяет файлы.
+Применение обновлений (\fB--update\fR, \fB--update-all\fR) требует root.
+.TP
+.B --check-updates
+Сравнить установленные модули с кэшем репозитория и вывести список доступных
+обновлений. \fBНе применяет обновления автоматически\fR и \fBне изменяет ни одного
+файла\fR. Безопасно запускать без root. Загрузчик при входе в систему
+(\fBmodman-update-check\fR) использует именно эту команду и также
+\fBне применяет обновления автоматически\fR.
+.RS
+.PP
+В режиме \fB--machine\fR каждая строка обновления содержит 11 TAB-разделённых
+полей:
+.PP
+.B update\etid\etname\etold_version\etnew_version\etinstalled_path\etcandidate_filename\etrepo\etrisk\etreboot_required\etmessage
+.PP
+.TS
+tab(@);
+l l.
+\fBПоле\fR@\fBЗначение\fR
+update@Тип строки (литерал)
+id@Уникальный идентификатор обновления (для --update <id>)
+name@Короткое имя модуля (identity)
+old_version@Текущая установленная версия
+new_version@Версия кандидата в репозитории
+installed_path@Полный путь к установленному файлу
+candidate_filename@Имя файла кандидата в репозитории
+repo@URL репозитория-источника
+risk@\fBnormal\fR | \fBloaded\fR | \fBsystem\fR
+reboot_required@\fB0\fR или \fB1\fR
+message@Человекочитаемое сообщение (пусто или \fBblacklisted\fR)
+.TE
+.PP
+Поле \fBrisk\fR:
+.RS
+.TP
+.B normal
+Модуль не загружен в текущей сессии.
+.TP
+.B loaded
+Модуль загружен после загрузки системы (hot-attached). Обновление безопасно,
+но вступит в силу только после перезагрузки или переподключения.
+.TP
+.B system
+Модуль загружен initrd до старта системы. Требует \fB--confirm-system-updates\fR.
+.RE
+.PP
+Поле \fBreboot_required\fR равно \fB1\fR, если новая версия модуля содержит
+изменения, требующие перезагрузки (например, ядро, initrd, базовые библиотеки).
+В этом случае в machine output добавляется строка:
+.PP
+.RS
+.B нужна перезагрузка
+.RE
+.PP
+Эта строка является частью машинного контракта и появляется дословно в
+machine output, GUI и \fIupdate.log\fR. Парсеры должны сопоставлять её
+как литерал.
+.RE
+.TP
+.B --update \fIID\fR
+Применить одно обновление по идентификатору \fIID\fR из вывода
+\fB--check-updates\fR. Скачивает кандидата, заменяет установленный файл,
+сохраняет резервную копию с суффиксом \fI.old\fR (или \fI.old.N\fR при
+нескольких резервных копиях). Записывает результат в \fIupdate.log\fR.
+.RS
+.PP
+Системные модули (\fBrisk=system\fR) отклоняются с кодом выхода \fB8\fR, если
+не передан флаг \fB--confirm-system-updates\fR.
+.RE
+.TP
+.B --update-all
+Применить все доступные обновления из \fB--check-updates\fR. Системные модули
+(\fBrisk=system\fR) пропускаются без \fB--confirm-system-updates\fR — они
+получают строку \fBskipped\fR в machine output, но не считаются ошибкой.
+.RS
+.PP
+Коды выхода:
+.TP
+.B 0
+Все обновления применены успешно (пропущенные системные не считаются ошибкой).
+.TP
+.B 1
+Хотя бы одно обновление завершилось ошибкой (скачивание, переименование, mv).
+.RE
+.TP
+.B --confirm-system-updates
+Глобальный флаг (как \fB--machine\fR): разрешает обновление модулей с
+\fBrisk=system\fR. Без этого флага \fB--update\fR завершается с кодом \fB8\fR,
+а \fB--update-all\fR пропускает системные модули.
+.RS
+.PP
+.B ВНИМАНИЕ:
+обновление системных модулей может потребовать перезагрузки. Всегда проверяйте
+поле \fBreboot_required\fR перед применением.
+.RE
+.TP
+.B --verbose-skips
+Глобальный флаг: включает вывод строк \fBskipped\fR в machine output для
+модулей, пропущенных при \fB--update-all\fR (например, из-за несравнимой
+версии или отсутствия кандидата). Без этого флага пропуски молчаливы.
+.RS
+.PP
+Формат строки \fBskipped\fR (4 поля):
+.PP
+.B skipped\etreason\etid\etmessage
+.RE
+.TP
+.B --include-blacklisted
+Глобальный флаг: включает в вывод \fB--check-updates\fR строки для версий,
+занесённых в чёрный список. Такие строки имеют \fBmessage=blacklisted\fR.
+Без этого флага заблокированные версии молчаливо пропускаются.
+.TP
+.B --update-blacklist-list
+Вывести содержимое файла чёрного списка обновлений. Каждая строка:
+\fBidentity\etversion\fR.
+.TP
+.B --update-blacklist-add \fIID-OR-CANDIDATE\fR
+Добавить версию в чёрный список. Принимает полное имя файла кандидата
+(\fIfoo-1.1.pfs\fR) или только identity (\fIfoo\fR) — в последнем случае
+выполняется поиск в кэше для определения последней версии.
+.TP
+.B --update-blacklist-remove \fIIDENTITY\fR \fIVERSION\fR
+Удалить конкретную запись из чёрного списка по identity и версии.
+.SS Машинный вывод: строки обновлений
+.PP
+В режиме \fB--machine\fR команды обновления выводят следующие типы строк:
+.TP
+.B update\etid\etname\etold_version\etnew_version\etinstalled_path\etcandidate_filename\etrepo\etrisk\etreboot_required\etmessage
+Доступное обновление (из \fB--check-updates\fR). 11 полей.
+.TP
+.B applied\etid\etold_path\etnew_path\etbackup_path\etrisk\etreboot_required\etmessage
+Обновление успешно применено. 8 полей.
+.TP
+.B skipped\etreason\etid\etmessage
+Обновление пропущено (только с \fB--verbose-skips\fR или для системных без
+\fB--confirm-system-updates\fR). 4 поля.
+.TP
+.B error\etreason\etid\etmessage
+Ошибка при применении обновления. 4 поля.
+.SS Коды выхода (команды обновления)
+.TP
+.B 0
+Успех.
+.TP
+.B 1
+Ошибка применения обновления (скачивание, mv, переименование).
+.TP
+.B 7
+Невалидный аргумент (имя модуля, id).
+.TP
+.B 8
+Системный модуль (\fBrisk=system\fR) без \fB--confirm-system-updates\fR.
+.SS Справка
+.TP
+.B -h, --help, help
+Вывести встроенную справку. Также срабатывает при запуске без аргументов.
+.SH GLOBAL OPTIONS
+.TP
+.B --machine
+TSV-вывод, пригодный для парсинга. Подавляет цветной / человекочитаемый
+вывод \fIprint_msg\fR, но сохраняет \fIprint_err\fR / \fIfatal_err\fR
+в stderr.
+.TP
+.B -d \fIDIR\fR, --download-dir \fIDIR\fR
+Переопределить
+.B DOWNLOAD_DIR
+для текущего вызова. Имеет приоритет над \fImodman.conf\fR и
+автоопределением (\fIpfs --download-dir\fR). Полезно, когда
+автоопределённый каталог доступен только для чтения (например, live ISO).
+.TP
+.B --progress-file \fIPATH\fR, --progress-file=\fIPATH\fR
+Файл для машиночитаемого прогресса загрузки. Эквивалентно установке
+переменной
+.B MODMAN_PROGRESS_FILE
+, но переживает эскалацию привилегий через
+.B pkexec
+(который удаляет незанесённые в белый список переменные окружения).
+Используется \fImodman-gui\fR для управления прогресс-баром. Файл
+перезаписывается при каждом тике тремя строками: \fIname=<module>\fR,
+\fIstage=download\fR, \fIpct=<0..100>\fR.
+.TP
+.B --lower
+Передать \fI-l\fR в \fIpfsload\fR \(em установить модуль в нижний слой AUFS.
+Взаимоисключает с \fB--upper\fR.
+.TP
+.B --upper
+Передать \fI-u\fR в \fIpfsload\fR \(em установить модуль в верхний слой AUFS
+(встроенное умолчание \fIpfsload\fR).
+.TP
+.B --toram
+Передать \fI-r\fR в \fIpfsload\fR \(em скопировать модуль в tmpfs перед
+монтированием. Совместим с \fB--lower\fR или \fB--upper\fR.
+.TP
+.B --load-cmd \fICMD\fR
+Переопределить \fICMD_LOAD\fR полной командной строкой \fICMD\fR. Разбивается
+по пробелам; итоговый argv — \fICMD\fR + путь к модулю. Используется
+контекстным меню GUI, когда ключи \fIPFSLOAD_ALLOW_*\fR задают
+пользовательские команды. НЕ совместим с \fB--lower/--upper/--toram\fR.
+.SH КОРОТКИЕ ПСЕВДОНИМЫ
+Для удобства ввода доступны короткие псевдонимы часто используемых
+команд. Поведение идентично длинной форме; обе формы принимаются
+в обоих диалектах (pacman-style и apt-style).
+.PP
+.TS
+tab(@);
+l l l.
+\fBДлинная форма\fR@\fBКороткий псевдоним\fR@\fBМнемоника\fR
+--list-loaded@-L@List loaded
+--list-loaded-before@-Lb@List loaded \(em before
+--list-loaded-after@-La@List loaded \(em after
+--list-local@-Ql@Query local
+--remove-local@-Rl@Remove local
+.TE
+.SH РАЗРЕШЕНИЕ ЗАВИСИМОСТЕЙ
+.SS Источник истины
+Каждый \fI.pfs\fR-модуль содержит скрипт \fIstart.sh\fR. Мейнтейнер
+кодирует зависимости строками вида:
+.PP
+.RS
+.B <pkg>-dep <dep1> <dep2> <dep3>
+.RE
+.SS Сторона мейнтейнера: \fImodman -di\fR
+Для каждого \fI*.${EXT}\fR в целевом каталоге:
+.IP "1." 4
+Извлечь \fIstart.sh\fR через \fIunsquashfs -cat\fR.
+.IP "2." 4
+Grep по регулярному выражению \fB[a-zA-Z0-9_-]+-dep [ A-Za-z0-9_-]+\fR.
+.IP "3." 4
+Убрать префикс \fB<pkg>-dep\fR; оставить список зависимостей.
+.IP "4." 4
+Дописать \fBshortname : dep1 dep2 ...\fR в \fI000-dependencies.txt\fR.
+.PP
+Кэш по mtime: если \fI.pfs\fR старше существующего
+\fI000-dependencies.txt\fR, кэшированная запись используется повторно
+без запуска \fIunsquashfs\fR.
+.SS Сторона клиента: \fImodman -Sy\fR
+.PP
+.RS
+\fBwget -qO\fR \fI${CACHE_DEP}\fR.tmp \fI<repo_url>/000-dependencies.txt\fR
+.br
+\fBmv\fR \fI${CACHE_DEP}\fR.tmp \fI${CACHE_DEP}\fR
+.RE
+.PP
+Ответ 404 оставляет \fI${CACHE_DEP}\fR усечённым до пустого файла.
+.SS Нормализация \fIshort_pkgname\fR
+Ключ кэша — \fIshortname\fR \(em базовое имя файла без
+\fI.${EXT}\fR с применением следующего регулярного выражения:
+.PP
+.RS
+\fBs/(-[0-9].*|_any.*|_64.*|-sf[0-9]+.*|-au[0-9]+.*)//\fR
+.RE
+.PP
+Убирает: версию (\fI-3.26.0...\fR), архитектуру (\fI_64\fR / \fI_any\fR),
+теги ревизии (\fI-sf06\fR / \fI-au01\fR).
+.PP
+.TS
+tab(@);
+l l.
+\fBПолное имя\fR@\fBshortname\fR
+evince-gtk3-p-3.26.0_64-sf06.pfs@evince-gtk3-p
+030-gtk3-2601-sf03.pfs@030-gtk3
+chromium-bin-gtk3-p-1.0_64-sf01.pfs@chromium-bin-gtk3-p
+.TE
+.SS Разрешение при \fImodman -S\fR
+.PP
+.RS
+.nf
+shortname=$(short_pkgname "$name")
+deps=$(grep "^$shortname :" "$CACHE_DEP" | cut -d':' -f2- | sed 's/^ *//')
+
+for dep in $deps; do
+    _validate_name "$dep"           # безопасность: [a-zA-Z0-9._+-]
+    _dep_is_ignored "$dep" && continue
+    "$0" $MACHINE_FLAG -S "$dep"    # рекурсивный подпроцесс
+done
+.fi
+.RE
+.PP
+Рекурсия реализована как новые вызовы подпроцесса
+.B "$0" -S
+, а не внутренние вызовы функций. Каждая зависимость отдельно
+перечитывает кэш, разрешает свои зависимости, скачивает и выполняет \fIpfsload\fR.
+.SH ОПРЕДЕЛЕНИЕ INITRD
+\fBmodman\fR делегирует логику, зависящую от initrd, в \fBpfs-utils\fR,
+который использует каталог плагинов-детекторов:
+.PP
+.RS
+\fI${INITRD_DETECTORS_DIR}\fR (по умолчанию
+\fI/usr/local/lib/pfs-utils/initrd-detectors/\fR)
+.RE
+.PP
+Каждый \fINN-name.sh\fR содержит функцию \fIdetect_<name>()\fR, которая
+возвращает 0 при совпадении и устанавливает глобальные переменные
+\fBINITRD_NAME\fR, \fBINITRD_LAYERING\fR, \fBINITRD_AUFS_PREFIX\fR,
+\fBINITRD_DOWNLOAD_DIR\fR. Диспетчер перебирает файлы в лексикографическом
+порядке (числовой префикс = приоритет); первое совпадение побеждает.
+.PP
+Поставляемые детекторы:
+.TS
+tab(@);
+l l l l.
+\fBФайл\fR@\fBinitrd\fR@\fBслойность\fR@\fBaufs prefix\fR
+10-uird.sh@uird@overlay@${SYSMNT}/bundles
+20-rootaufs2.sh@rootaufs2@aufs@/run/archroot/live/memory/images
+30-porteus.sh@porteus@aufs@${SYSMNT}/bundles
+40-livekit.sh@livekit@overlay@${SYSMNT}/bundles
+.TE
+.PP
+Добавление нового типа initrd — это drop-in: поместите \fI50-yourname.sh\fR
+с контрактом, описанным выше; правки в библиотеку \fIpfs\fR не нужны.
+.SH АВТООПРЕДЕЛЕНИЕ (FALLBACK)
+\fBmodman\fR использует следующий порядок разрешения для
+параметров, производных от initrd:
+.IP "1." 4
+\fBconfig\fR \(em значение из \fImodman.conf\fR(5).
+.IP "2." 4
+\fBCLI override\fR \(em \fB-d\fR для \fBDOWNLOAD_DIR\fR.
+.IP "3." 4
+\fBautodetect\fR \(em вызов \fIpfs --aufs-initrd-prefix\fR или
+\fIpfs --download-dir\fR.
+.PP
+Если автоопределение не удалось (ни один детектор не совпал или
+\fIdir=\fR отсутствует в \fI/proc/cmdline\fR), значение остаётся пустым.
+Команды, которым нужна эта переменная, выводят понятное сообщение в stderr
+и завершаются с \fBexit 1\fR; несвязанные команды (\fI--help\fR,
+\fI--list-local\fR с явным \fBDOWNLOAD_DIR\fR, \fI--list-loaded\fR без
+фильтра) продолжают работать.
+.SH КОНФИГУРАЦИЯ
+Следующие ключи читаются из \fImodman.conf\fR(5). Они управляют
+контекстным меню в \fBmodman-gui\fR и опцией CLI \fB--load-cmd\fR.
+.TP
+.B PFSLOAD_ALLOW_LOWER
+Команда контекстного меню для «Подключить в нижний слой». Строковое
+значение содержит полную команду (например, \fIpfsload -l\fR). Пустое
+или отсутствующее значение \(-> пункт меню скрыт.
+.TP
+.B PFSLOAD_ALLOW_TORAM
+Команда контекстного меню для «Подключить в RAM» (например, \fIpfsload -r\fR).
+.TP
+.B PFSLOAD_ALLOW_LOWER_TORAM
+Команда контекстного меню для «нижний слой + RAM» (например, \fIpfsload -l -r\fR).
+.TP
+.B PFSLOAD_ALLOW_UPPER_TORAM
+Команда контекстного меню для «верхний слой + RAM» (например, \fIpfsload -u -r\fR).
+.SH ПРИМЕРЫ
+.SS Простая установка
+.PP
+.RS
+.nf
+sudo modman -S evince
+.fi
+.RE
+.SS Пропуск предустановленных зависимостей
+\fImodman.conf\fR:
+.PP
+.RS
+\fBMODMAN_IGNORE_DEPS="030-gtk3"\fR
+.RE
+.PP
+modman пропускает \fB030-gtk3\fR с информационным сообщением вместо
+рекурсивной установки.
+.SS Переопределение каталога загрузки (автоопределённый путь только для чтения)
+.PP
+.RS
+.nf
+sudo modman -d /tmp/modman-cache -S evince
+.fi
+.RE
+.SS Установка локального файла
+.PP
+.RS
+.nf
+sudo modman -S /mnt/sr0/zz2601/modules/+/openssh-2601.pfs
+sudo modman -S ./openssh-2601.pfs
+.fi
+.RE
+.SS Удаление по короткому имени
+.PP
+.RS
+.nf
+sudo modman -R evince
+.fi
+.RE
+\fBmodman\fR разрешает \fBevince\fR в загруженный
+\fBevince-gtk3-p-3.26.0_64-sf06\fR через \fIpfsinfo --machine --mount\fR.
+.SS Машиночитаемый листинг для downstream-парсеров
+.PP
+.RS
+.nf
+modman --machine --list-loaded-before
+.fi
+.RE
+.SS Удаление локального файла
+.PP
+.RS
+.nf
+modman --remove-local evince
+modman -Rl evince evince-gtk3-p
+.fi
+.RE
+.SS Проверка обновлений (безопасно, root не нужен)
+.PP
+.RS
+.nf
+modman --machine --check-updates
+.fi
+.RE
+.SS Применение одного обновления
+.PP
+.RS
+.nf
+sudo modman --update <id>
+.fi
+.RE
+.SS Применение всех обновлений, включая системные модули
+.PP
+.RS
+.nf
+sudo modman --update-all --confirm-system-updates
+.fi
+.RE
+.SH ПРЕДОСТЕРЕЖЕНИЯ
+.SS Циклические зависимости
+Циклический граф зависимостей (A \(-> B \(-> A) вызывает бесконечную
+рекурсию. Множества посещённых узлов нет; оператор должен избегать
+таких графов на этапе генерации \fI-di\fR.
+.SS Ромбовидные зависимости
+A \(-> B, A \(-> C, B \(-> C приводит к двойной установке C. Мемоизации
+через дерево рекурсивных подпроцессов нет.
+.SS Отсутствие ограничений версий
+Строки \fI<pkg>-dep\fR перечисляют только
+.B имена
+зависимостей. Ограничений в стиле SemVer \fB>=1.0\fR нет; побеждает
+та версия, которая есть в кэше.
+.SS Отсутствие топологической сортировки
+Зависимости обрабатываются в порядке, извлечённом регулярным выражением;
+обход дерева в прямом порядке. Параллельная установка не поддерживается.
+.SS Уже загруженные зависимости
+Зависимость, уже загруженная через \fIpfsload\fR, всё равно устанавливается
+повторно. \fIpfsload\fR может сообщить об ошибке или выполнить no-op в
+зависимости от режима слойности.
+.SS Зависимость отсутствует в кэше
+Если \fImodman -S dep\fR завершается неудачей, потому что зависимость
+отсутствует в \fI${CACHE_FILE}\fR, родительская установка продолжается
+со следующей зависимостью (итерация цикла).
+.B MODMAN_IGNORE_DEPS
+— рекомендуемый способ подавить такие случаи, когда зависимость
+встроена в базовый модуль.
+.SH FILES
+.TP
+.I /etc/modman.conf
+Общесистемная конфигурация. См. \fImodman.conf\fR(5).
+.TP
+.I ~/.config/modman/modman.conf
+Пользовательское переопределение.
+.TP
+.I ${CACHE_DIR}/db.txt
+Локальный кэш \fI000-index.txt\fR (по умолчанию \fI/var/cache/modman/db.txt\fR).
+.TP
+.I ${CACHE_DIR}/dependencies.txt
+Локальный кэш \fI000-dependencies.txt\fR.
+.TP
+.I ${DOWNLOAD_DIR}
+Каталог для скачанных \fI*.${EXT}\fR файлов. Для rootaufs2 автоопределяется
+как \fI/mnt/home/${dir}/optional\fR.
+.TP
+.I /usr/local/lib/pfs-utils/initrd-detectors/
+Каталог плагинов-детекторов initrd (предоставляется \fBpfs-utils-cli\fR).
+.SH SEE ALSO
+.BR modman.conf (5),
+.BR pfs-utils (8),
+.BR pfs (8),
+.BR pfsload (8),
+.BR pfsunload (8),
+.BR pfsinfo (8),
+.BR pfsbench (8),
+.BR pfsexec (8),
+.BR pfsactivate (8),
+.BR pfsdeactivate (8)
+.PP
+ADR:
+.IR docs/adr/0001-layering-dispatch.md ,
+.IR docs/adr/0002-v4-backward-compat.md
+.SH ПРИМЕЧАНИЕ К ПЕРЕВОДУ
+Перевод выполнен по английскому man-источнику (docs/modman.8).

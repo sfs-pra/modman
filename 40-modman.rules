@@ -1,0 +1,28 @@
+// Permit pkexec /usr/bin/modman without password for users in wheel group.
+//
+// Why a rules file (not a .policy file with custom action id):
+// pkexec uses the org.freedesktop.policykit.exec action by default. Custom
+// actions only kick in if a .policy file declares
+//   <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/modman</annotate>
+// — but that hijacks dispatch and breaks any sysadmin's existing rules.d
+// whitelist that already targets org.freedesktop.policykit.exec (e.g.
+// /etc/polkit-1/rules.d/49-wheel-pkexec-allow.rules). Using a rules file
+// keeps modman aligned with the standard pkexec flow so existing whitelists
+// keep working.
+//
+// Priority 40 places this BEFORE typical sysadmin rules (which start at 49 or
+// 50), so the package ships a sensible default; sysadmins keep full override
+// power via /etc/polkit-1/rules.d/.
+
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.policykit.exec") {
+        return;
+    }
+    if (action.lookup("program") !== "/usr/bin/modman") {
+        return;
+    }
+    if (!subject.isInGroup("wheel")) {
+        return;
+    }
+    return polkit.Result.YES;
+});

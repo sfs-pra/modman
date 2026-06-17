@@ -1,0 +1,184 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: modman-tui 2026.04\n"
+"Report-Msgid-Bugs-To:\n"
+"POT-Creation-Date: 2026-05-29 00:00+0000\n"
+"PO-Revision-Date: 2026-05-29 00:00+0000\n"
+"Last-Translator: modman maintainers\n"
+"Language-Team: Russian\n"
+"Language: ru\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);\n"
+
+msgid "Feature is unavailable in the current backend:"
+msgstr "Функция недоступна в текущем backend:"
+
+msgid "No data"
+msgstr "Нет данных"
+
+msgid "yes"
+msgstr "да"
+
+msgid "no"
+msgstr "нет"
+
+msgid "no data from backend"
+msgstr "нет данных от backend"
+
+msgid "SQUASHFS compression:"
+msgstr "SQUASHFS сжатие:"
+
+msgid "SQUASHFS compression level:"
+msgstr "SQUASHFS уровень сжатия:"
+
+msgid "EROFS compression:"
+msgstr "EROFS сжатие:"
+
+msgid "Name:"
+msgstr "Имя:"
+
+msgid "Layer:"
+msgstr "Слой:"
+
+msgid "Path:"
+msgstr "Путь:"
+
+msgid "Version/description:"
+msgstr "Версия/описание:"
+
+msgid "Load mode:"
+msgstr "Режим подключения:"
+
+msgid "not specified"
+msgstr "не указан"
+
+msgid "In RAM:"
+msgstr "В RAM:"
+
+msgid "Size:"
+msgstr "Размер:"
+
+msgid "Date:"
+msgstr "Дата:"
+
+msgid "Action:"
+msgstr "Действие:"
+
+msgid "Detach"
+msgstr "Отключить"
+
+msgid "Details"
+msgstr "Подробности"
+
+msgid "Back"
+msgstr "Назад"
+
+msgid "Local"
+msgstr "Локальные"
+
+msgid "Attach selected"
+msgstr "Подключить выбранные"
+
+msgid "Remove local files"
+msgstr "Удалить локальные"
+
+msgid "Select file..."
+msgstr "Выбрать файл..."
+
+msgid "Attach"
+msgstr "Подключение"
+
+msgid "Remove selected local files?"
+msgstr "Удалить выбранные локальные файлы?"
+
+msgid "Attach file"
+msgstr "Подключение файла"
+
+msgid "Search"
+msgstr "Поиск"
+
+msgid "Online search"
+msgstr "Инет / поиск"
+
+msgid "Search results"
+msgstr "Результаты поиска"
+
+msgid "Attach selected modules?"
+msgstr "Подключить выбранные модули?"
+
+msgid "Updates"
+msgstr "Обновления"
+
+msgid "system, reboot required"
+msgstr "системное, нужна перезагрузка"
+
+msgid "after reattach/reboot"
+msgstr "после переподключения/перезагрузки"
+
+msgid "Apply selected"
+msgstr "Применить выбранные"
+
+msgid "Blacklist selected"
+msgstr "В ЧС выбранные"
+
+msgid "Edit blacklist"
+msgstr "Редактировать ЧС"
+
+msgid "Selected updates include system modules. Continue?"
+msgstr "Среди выбранных есть системные обновления. Продолжить?"
+
+msgid "Update"
+msgstr "Обновление"
+
+msgid "Add selected updates to blacklist?"
+msgstr "Добавить выбранные обновления в ЧС?"
+
+msgid "Blacklist"
+msgstr "Чёрный список"
+
+msgid "Remove selected blacklist entries?"
+msgstr "Удалить выбранные записи из ЧС?"
+
+msgid "Clean old .pfs.old files"
+msgstr "Очистка старых .pfs.old"
+
+msgid "Remove selected .old files?"
+msgstr "Удалить выбранные .old файлы?"
+
+msgid "Cleanup"
+msgstr "Очистка"
+
+msgid "Settings / About"
+msgstr "Настройки / О программе"
+
+msgid "Show config path"
+msgstr "Показать путь к конфигу"
+
+msgid "About"
+msgstr "О программе"
+
+msgid "Configuration"
+msgstr "Конфигурация"
+
+msgid "A local modman.conf in the current directory can take precedence."
+msgstr "Локальный modman.conf в текущем каталоге может иметь приоритет."
+
+msgid "MODMAN_CONF can override the path when supported by the backend."
+msgstr "MODMAN_CONF может переопределять путь, если это поддерживает backend."
+
+msgid "TUI calls only modman --machine."
+msgstr "TUI вызывает только modman --machine."
+
+msgid "Module manager"
+msgstr "Менеджер модулей"
+
+msgid "Connected"
+msgstr "Подключенные"
+
+msgid "System"
+msgstr "Система"
+
+msgid "Exit"
+msgstr "Выход"

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=PFS Module Update Check
+Name[ru]=Проверка обновлений модулей PFS
+Name[en]=PFS Module Update Check
+Comment=Check for available pfs module updates at login
+Comment[ru]=Проверка доступных обновлений pfs-модулей при входе в систему
+Comment[en]=Check for available pfs module updates at login
+Exec=modman-update-check
+Icon=software-update-available
+Terminal=false
+Categories=System;
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=10
+NoDisplay=true

@@ -1,0 +1,182 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: modman-tui 2026.04\n"
+"Report-Msgid-Bugs-To:\n"
+"POT-Creation-Date: 2026-05-29 00:00+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Feature is unavailable in the current backend:"
+msgstr ""
+
+msgid "No data"
+msgstr ""
+
+msgid "yes"
+msgstr ""
+
+msgid "no"
+msgstr ""
+
+msgid "no data from backend"
+msgstr ""
+
+msgid "SQUASHFS compression:"
+msgstr ""
+
+msgid "SQUASHFS compression level:"
+msgstr ""
+
+msgid "EROFS compression:"
+msgstr ""
+
+msgid "Name:"
+msgstr ""
+
+msgid "Layer:"
+msgstr ""
+
+msgid "Path:"
+msgstr ""
+
+msgid "Version/description:"
+msgstr ""
+
+msgid "Load mode:"
+msgstr ""
+
+msgid "not specified"
+msgstr ""
+
+msgid "In RAM:"
+msgstr ""
+
+msgid "Size:"
+msgstr ""
+
+msgid "Date:"
+msgstr ""
+
+msgid "Action:"
+msgstr ""
+
+msgid "Detach"
+msgstr ""
+
+msgid "Details"
+msgstr ""
+
+msgid "Back"
+msgstr ""
+
+msgid "Local"
+msgstr ""
+
+msgid "Attach selected"
+msgstr ""
+
+msgid "Remove local files"
+msgstr ""
+
+msgid "Select file..."
+msgstr ""
+
+msgid "Attach"
+msgstr ""
+
+msgid "Remove selected local files?"
+msgstr ""
+
+msgid "Attach file"
+msgstr ""
+
+msgid "Search"
+msgstr ""
+
+msgid "Online search"
+msgstr ""
+
+msgid "Search results"
+msgstr ""
+
+msgid "Attach selected modules?"
+msgstr ""
+
+msgid "Updates"
+msgstr ""
+
+msgid "system, reboot required"
+msgstr ""
+
+msgid "after reattach/reboot"
+msgstr ""
+
+msgid "Apply selected"
+msgstr ""
+
+msgid "Blacklist selected"
+msgstr ""
+
+msgid "Edit blacklist"
+msgstr ""
+
+msgid "Selected updates include system modules. Continue?"
+msgstr ""
+
+msgid "Update"
+msgstr ""
+
+msgid "Add selected updates to blacklist?"
+msgstr ""
+
+msgid "Blacklist"
+msgstr ""
+
+msgid "Remove selected blacklist entries?"
+msgstr ""
+
+msgid "Clean old .pfs.old files"
+msgstr ""
+
+msgid "Remove selected .old files?"
+msgstr ""
+
+msgid "Cleanup"
+msgstr ""
+
+msgid "Settings / About"
+msgstr ""
+
+msgid "Show config path"
+msgstr ""
+
+msgid "About"
+msgstr ""
+
+msgid "Configuration"
+msgstr ""
+
+msgid "A local modman.conf in the current directory can take precedence."
+msgstr ""
+
+msgid "MODMAN_CONF can override the path when supported by the backend."
+msgstr ""
+
+msgid "TUI calls only modman --machine."
+msgstr ""
+
+msgid "Module manager"
+msgstr ""
+
+msgid "Connected"
+msgstr ""
+
+msgid "System"
+msgstr ""
+
+msgid "Exit"
+msgstr ""

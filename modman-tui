@@ -1,0 +1,867 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+VERSION="2026.04"
+BACKTITLE="modman-tui"
+TEXTDOMAIN="modman-tui"
+TEXTDOMAINDIR="${TEXTDOMAINDIR:-/usr/share/locale}"
+export TEXTDOMAIN TEXTDOMAINDIR
+
+MODMAN_BIN_RESOLVED=""
+DIALOG_BIN_RESOLVED=""
+TMP_ROOT=""
+
+_() {
+    if command -v gettext >/dev/null 2>&1; then
+        gettext "$1"
+        return 0
+    fi
+    printf '%s' "$1"
+}
+
+die() {
+    printf 'modman-tui: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage: modman-tui [--help] [--version]
+
+Terminal dialog frontend for modman.
+
+Environment:
+  MODMAN_BIN          Override backend path (default: first modman in PATH)
+  DIALOG_BIN          Override dialog path (default: first dialog in PATH)
+  MODMAN_TUI_TMPDIR   Use an existing temporary directory for tests
+EOF
+}
+
+find_modman() {
+    if [[ -n "${MODMAN_BIN:-}" ]]; then
+        [[ -x "${MODMAN_BIN}" ]] || die "modman not executable: ${MODMAN_BIN}"
+        printf '%s' "${MODMAN_BIN}"
+        return 0
+    fi
+    command -v modman || return 1
+}
+
+find_dialog() {
+    if [[ -n "${DIALOG_BIN:-}" ]]; then
+        [[ -x "${DIALOG_BIN}" ]] || die "dialog not executable: ${DIALOG_BIN}"
+        printf '%s' "${DIALOG_BIN}"
+        return 0
+    fi
+    command -v dialog || return 1
+}
+
+tmp_cleanup() {
+    if [[ -n "${TMP_ROOT}" && -z "${MODMAN_TUI_TMPDIR:-}" && -d "${TMP_ROOT}" ]]; then
+        rm -rf -- "${TMP_ROOT}"
+    fi
+}
+
+tmp_init() {
+    if [[ -n "${MODMAN_TUI_TMPDIR:-}" ]]; then
+        mkdir -p -- "${MODMAN_TUI_TMPDIR}"
+        TMP_ROOT="${MODMAN_TUI_TMPDIR}"
+    else
+        TMP_ROOT="$(mktemp -d)"
+    fi
+    trap tmp_cleanup EXIT
+}
+
+dialog_run() {
+    "${DIALOG_BIN_RESOLVED}" --stdout --backtitle "${BACKTITLE}" "$@"
+}
+
+modman_run() {
+    "${MODMAN_BIN_RESOLVED}" --machine "$@"
+}
+
+tsv_unescape() {
+    local input="${1-}"
+    local output=""
+    local char=""
+    local next=""
+    local idx=0
+
+    while ((idx < ${#input})); do
+        char="${input:idx:1}"
+        if [[ "${char}" == "\\" && $((idx + 1)) -lt ${#input} ]]; then
+            next="${input:idx+1:1}"
+            case "${next}" in
+                t)
+                    output+=$'\t'
+                    ;;
+                n)
+                    output+=$'\n'
+                    ;;
+                \\)
+                    output+="\\"
+                    ;;
+                *)
+                    output+="${char}${next}"
+                    ;;
+            esac
+            idx=$((idx + 2))
+            continue
+        fi
+        output+="${char}"
+        idx=$((idx + 1))
+    done
+    printf '%s' "${output}"
+}
+
+split_tsv() {
+    local line="$1"
+    local out_name="$2"
+    local -n target_ref="${out_name}"
+    local field=""
+
+    target_ref=()
+    IFS=$'\t' read -r -a target_ref <<<"${line}"
+    for field in "${!target_ref[@]}"; do
+        target_ref["${field}"]="$(tsv_unescape "${target_ref[${field}]}")"
+    done
+}
+
+is_unknown_command() {
+    local status="$1"
+    local stderr_text="$2"
+
+    [[ "${status}" -eq 2 ]] && return 0
+    [[ "${stderr_text}" == *"unknown option"* ]] && return 0
+    [[ "${stderr_text}" == *"unknown command"* ]] && return 0
+    return 1
+}
+
+show_unavailable() {
+    local screen_name="$1"
+    dialog_run --msgbox "$(_ "Feature is unavailable in the current backend:") ${screen_name}" 8 70 >/dev/null || true
+}
+
+show_message() {
+    local message="$1"
+    dialog_run --msgbox "${message}" 8 70 >/dev/null || true
+}
+
+show_command_result() {
+    local title="$1"
+    local stdout_file="$2"
+    local stderr_file="$3"
+    local status="$4"
+    local result_file="${TMP_ROOT}/result.$$"
+
+    {
+        printf '%s\n' "${title}"
+        printf 'status=%s\n\n' "${status}"
+        printf 'stdout:\n'
+        [[ -s "${stdout_file}" ]] && cat "${stdout_file}"
+        printf '\n\nstderr:\n'
+        [[ -s "${stderr_file}" ]] && cat "${stderr_file}"
+    } >"${result_file}"
+    dialog_run --textbox "${result_file}" 20 90 >/dev/null || true
+}
+
+backend_or_unavailable() {
+    local screen_name="$1"
+    local stdout_file="$2"
+    local stderr_file="$3"
+    shift 3
+    local status=0
+
+    : >"${stdout_file}"
+    : >"${stderr_file}"
+    if ! modman_run "$@" >"${stdout_file}" 2>"${stderr_file}"; then
+        status=$?
+        if is_unknown_command "${status}" "$(<"${stderr_file}")"; then
+            show_unavailable "${screen_name}"
+            return 2
+        fi
+        show_command_result "${screen_name}" "${stdout_file}" "${stderr_file}" "${status}"
+        return "${status}"
+    fi
+    return 0
+}
+
+run_mutation() {
+    local title="$1"
+    shift
+    local stdout_file="${TMP_ROOT}/mutation.out"
+    local stderr_file="${TMP_ROOT}/mutation.err"
+    local status=0
+
+    : >"${stdout_file}"
+    : >"${stderr_file}"
+    if ! modman_run "$@" >"${stdout_file}" 2>"${stderr_file}"; then
+        status=$?
+    fi
+    show_command_result "${title}" "${stdout_file}" "${stderr_file}" "${status}"
+    return "${status}"
+}
+
+rows_to_textbox() {
+    local title="$1"
+    local text="$2"
+    local file="${TMP_ROOT}/rows.$$"
+
+    if [[ -z "${text}" ]]; then
+        show_message "$(_ "No data")"
+        return 0
+    fi
+    printf '%s\n' "${text}" >"${file}"
+    dialog_run --title "${title}" --textbox "${file}" 20 90 >/dev/null || true
+}
+
+parse_loaded_line() {
+    local line="$1"
+    local out_name="$2"
+    local -n loaded_ref="${out_name}"
+
+    split_tsv "${line}" "${out_name}"
+    [[ "${#loaded_ref[@]}" -ge 4 ]] || return 1
+    while [[ "${#loaded_ref[@]}" -lt 6 ]]; do
+        loaded_ref+=("")
+    done
+    return 0
+}
+
+parse_local_line() {
+    local line="$1"
+    local out_name="$2"
+    local -n local_ref="${out_name}"
+
+    split_tsv "${line}" "${out_name}"
+    [[ "${#local_ref[@]}" -eq 4 ]]
+}
+
+parse_inet_line() {
+    local line="$1"
+    local out_name="$2"
+    local -n inet_ref="${out_name}"
+
+    split_tsv "${line}" "${out_name}"
+    [[ "${#inet_ref[@]}" -ge 4 && "${#inet_ref[@]}" -le 6 ]]
+}
+
+parse_update_line() {
+    local line="$1"
+    local out_name="$2"
+    local -n update_ref="${out_name}"
+
+    split_tsv "${line}" "${out_name}"
+    if [[ "${#update_ref[@]}" -eq 10 ]]; then
+        update_ref+=("")
+    fi
+    [[ "${#update_ref[@]}" -eq 11 && "${update_ref[0]}" == "update" ]]
+}
+
+selected_lines_to_array() {
+    local input="$1"
+    local out_name="$2"
+    local -n selected_ref="${out_name}"
+    local line=""
+
+    selected_ref=()
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        line="${line%\"}"
+        line="${line#\"}"
+        selected_ref+=("${line}")
+    done <<<"${input}"
+}
+
+sort_file_by_field() {
+    local file="$1"
+    local field="${2:-1}"
+    local sorted="${TMP_ROOT}/sorted.$$.$RANDOM"
+
+    sort -t $'\t' -f -k"${field},${field}" "${file}" >"${sorted}"
+    mv -- "${sorted}" "${file}"
+}
+
+format_layer() {
+    local layer="$1"
+
+    if [[ "${layer}" =~ ^[0-9]+$ ]]; then
+        printf '%02d' "${layer}"
+        return 0
+    fi
+    printf '%-2s' "${layer}"
+}
+
+format_size() {
+    printf '%8s' "$1"
+}
+
+wrap_text() {
+    local text="$1"
+    local width="${2:-68}"
+    local indent="${3:-  }"
+
+    while ((${#text} > width)); do
+        printf '%s%s\n' "${indent}" "${text:0:width}"
+        text="${text:width}"
+    done
+    printf '%s%s\n' "${indent}" "${text}"
+}
+
+ram_label() {
+    case "$1" in
+        yes)
+            printf '%s' "$(_ "yes")"
+            ;;
+        no)
+            printf '%s' "$(_ "no")"
+            ;;
+        "")
+            printf '%s' "$(_ "no data from backend")"
+            ;;
+        *)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
+print_module_fs_details() {
+    local path="$1"
+    local output=""
+    local line=""
+    local compression=""
+    local compression_level=""
+
+    if command -v unsquashfs >/dev/null 2>&1; then
+        output="$(unsquashfs -s "${path}" 2>/dev/null)" || output=""
+        if [[ "${output}" == *"SQUASHFS"* ]]; then
+            while IFS= read -r line; do
+                if [[ "${line}" =~ ^[[:space:]]*[Cc]ompression[-[:space:]]+[Ll]evel[[:space:]]+(.+)$ ]]; then
+                    compression_level="${BASH_REMATCH[1]}"
+                elif [[ "${line}" =~ ^[[:space:]]*[Cc]ompression[[:space:]]+(.+)$ ]]; then
+                    compression="${BASH_REMATCH[1]}"
+                fi
+            done <<<"${output}"
+
+            [[ -n "${compression}" ]] && printf '%s %s\n' "$(_ "SQUASHFS compression:")" "${compression}"
+            [[ -n "${compression_level}" ]] && printf '%s %s\n' "$(_ "SQUASHFS compression level:")" "${compression_level}"
+            return 0
+        fi
+    fi
+
+    command -v dump.erofs >/dev/null 2>&1 || return 0
+    output="$(dump.erofs "${path}" 2>/dev/null)" || return 0
+    while IFS= read -r line; do
+        if [[ "${line}" =~ ^[[:space:]]*[Cc]ompression[[:space:]:]+(.+)$ ]]; then
+            compression="${BASH_REMATCH[1]}"
+            break
+        fi
+    done <<<"${output}"
+
+    [[ -n "${compression}" ]] && printf '%s %s\n' "$(_ "EROFS compression:")" "${compression}"
+}
+
+tag_for_index() {
+    printf '%03d' "$1"
+}
+
+line_by_tag() {
+    local tag="$1"
+    local rows_file="$2"
+    local idx=0
+    local line=""
+    local current=1
+
+    [[ "${tag}" =~ ^[0-9]+$ ]] || return 1
+    idx=$((10#${tag}))
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        if [[ "${current}" -eq "${idx}" ]]; then
+            printf '%s' "${line}"
+            return 0
+        fi
+        current=$((current + 1))
+    done <"${rows_file}"
+    return 1
+}
+
+search_name_for_tag() {
+    local tag="$1"
+    local rows_file="$2"
+    local fields=()
+    local line=""
+
+    line="$(line_by_tag "${tag}" "${rows_file}")" || return 1
+    parse_inet_line "${line}" fields || return 1
+    printf '%s' "${fields[0]}"
+}
+
+update_field_for_tag() {
+    local tag="$1"
+    local rows_file="$2"
+    local field_index="$3"
+    local fields=()
+    local line=""
+
+    line="$(line_by_tag "${tag}" "${rows_file}")" || return 1
+    parse_update_line "${line}" fields || return 1
+    printf '%s' "${fields[${field_index}]}"
+}
+
+loaded_details_for() {
+    local module_name="$1"
+    local rows_file="$2"
+    local line=""
+    local fields=()
+
+    while IFS= read -r line; do
+        parse_loaded_line "${line}" fields || continue
+        [[ "${fields[0]}" == "${module_name}" ]] || continue
+        {
+            printf '%s %s\n' "$(_ "Name:")" "${fields[0]}"
+            printf '%s %s\n' "$(_ "Layer:")" "$(format_layer "${fields[1]}")"
+            printf '%s\n' "$(_ "Path:")"
+            wrap_text "${fields[2]}" 68 "  "
+            printf '%s %s\n' "$(_ "Version/description:")" "${fields[3]}"
+            printf '%s %s\n' "$(_ "Load mode:")" "${fields[4]:-$(_ "not specified")}"
+            printf '%s %s\n' "$(_ "In RAM:")" "$(ram_label "${fields[5]}")"
+            printf 'Backend: %s\n' "${MODMAN_BIN_RESOLVED}"
+        }
+        return 0
+    done <"${rows_file}"
+
+    printf '%s\n' "${module_name}"
+}
+
+local_details_for() {
+    local rows_file="$1"
+    shift
+    local selected_names=("$@")
+    local line=""
+    local fields=()
+    local selected=""
+
+    for selected in "${selected_names[@]}"; do
+        while IFS= read -r line; do
+            parse_local_line "${line}" fields || continue
+            [[ "${fields[0]}" == "${selected}" ]] || continue
+            printf '%s %s\n' "$(_ "Name:")" "${fields[0]}"
+            printf '%s %s\n' "$(_ "Size:")" "${fields[1]}"
+            printf '%s %s\n' "$(_ "Date:")" "${fields[2]}"
+            printf '%s\n' "$(_ "Path:")"
+            wrap_text "${fields[3]}" 68 "  "
+            print_module_fs_details "${fields[3]}"
+            printf '\n'
+            break
+        done <"${rows_file}"
+    done
+}
+
+screen_loaded() {
+    local screen_name="$1"
+    local command_name="$2"
+    local stdout_file="${TMP_ROOT}/${command_name}.out"
+    local stderr_file="${TMP_ROOT}/${command_name}.err"
+    local line=""
+    local fields=()
+    local menu_args=()
+    local selected=""
+    local action=""
+    local status=0
+    local row_text=""
+    local details=""
+
+    backend_or_unavailable "${screen_name}" "${stdout_file}" "${stderr_file}" "${command_name}" || return 0
+    if [[ ! -s "${stdout_file}" ]]; then
+        show_message "$(_ "No data")"
+        return 0
+    fi
+    sort_file_by_field "${stdout_file}" 1
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        if ! parse_loaded_line "${line}" fields; then
+            show_unavailable "${screen_name}"
+            return 0
+        fi
+        row_text="$(format_layer "${fields[1]}") | ${fields[3]} | ${fields[2]}"
+        menu_args+=("${fields[0]}" "${row_text}")
+    done <"${stdout_file}"
+
+    if ! selected="$(dialog_run --menu "${screen_name}" 20 90 12 "${menu_args[@]}")"; then
+        return 0
+    fi
+    [[ -n "${selected}" ]] || return 0
+
+    if ! action="$(dialog_run --menu "$(_ "Action:") ${selected}" 12 70 4 unload "$(_ "Detach")" details "$(_ "Details")" back "$(_ "Back")")"; then
+        return 0
+    fi
+    case "${action}" in
+        unload)
+            if dialog_run --yesno "$(_ "Detach") ${selected}?" 8 70 >/dev/null; then
+                run_mutation "$(_ "Detach")" -R "${selected}" || true
+            fi
+            ;;
+        details)
+            details="$(loaded_details_for "${selected}" "${stdout_file}")"
+            rows_to_textbox "$(_ "Details")" "${details}"
+            ;;
+        *)
+            status=0
+            ;;
+    esac
+    return "${status}"
+}
+
+screen_local() {
+    local stdout_file="${TMP_ROOT}/local.out"
+    local stderr_file="${TMP_ROOT}/local.err"
+    local line=""
+    local fields=()
+    local checklist_args=()
+    local selected_output=""
+    local selections=()
+    local action=""
+    local selected=""
+    local module_names=()
+    local module_name=""
+    local selected_path=""
+
+    while true; do
+        checklist_args=()
+        selected_output=""
+        selections=()
+        module_names=()
+
+        backend_or_unavailable "$(_ "Local")" "${stdout_file}" "${stderr_file}" --list-local || return 0
+        if [[ ! -s "${stdout_file}" ]]; then
+            show_message "$(_ "No data")"
+            return 0
+        fi
+        sort_file_by_field "${stdout_file}" 1
+        while IFS= read -r line; do
+            [[ -n "${line}" ]] || continue
+            if ! parse_local_line "${line}" fields; then
+                show_unavailable "$(_ "Local")"
+                return 0
+            fi
+            checklist_args+=("${fields[0]}" "$(format_size "${fields[1]}") | ${fields[2]} | ${fields[3]}" off)
+        done <"${stdout_file}"
+        if ! selected_output="$(dialog_run --separate-output --checklist "$(_ "Local")" 20 100 12 "${checklist_args[@]}")"; then
+            selected_output=""
+        fi
+        selected_lines_to_array "${selected_output}" selections
+        if ! action="$(dialog_run --menu "$(_ "Local")" 16 70 6 attach "$(_ "Attach selected")" details "$(_ "Details")" remove "$(_ "Remove local files")" fselect "$(_ "Select file...")" back "$(_ "Back")")"; then
+            return 0
+        fi
+        case "${action}" in
+            attach)
+                for selected in "${selections[@]}"; do
+                    selected_path="${selected}"
+                    while IFS= read -r line; do
+                        parse_local_line "${line}" fields || continue
+                        if [[ "${fields[0]}" == "${selected}" ]]; then
+                            selected_path="${fields[3]}"
+                            break
+                        fi
+                    done <"${stdout_file}"
+                    run_mutation "$(_ "Attach")" -S "${selected_path}" || true
+                done
+                return 0
+                ;;
+            remove)
+                [[ "${#selections[@]}" -gt 0 ]] || return 0
+                if dialog_run --yesno "$(_ "Remove selected local files?")" 8 70 >/dev/null; then
+                    for selected in "${selections[@]}"; do
+                        module_names+=("${selected}")
+                    done
+                    run_mutation "$(_ "Remove local files")" --remove-local "${module_names[@]}" || true
+                fi
+                return 0
+                ;;
+            details)
+                [[ "${#selections[@]}" -gt 0 ]] || continue
+                rows_to_textbox "$(_ "Details")" "$(local_details_for "${stdout_file}" "${selections[@]}")"
+                ;;
+            fselect)
+                if module_name="$(dialog_run --fselect "${PWD}/" 20 90)"; then
+                    if [[ -n "${module_name}" ]]; then
+                        run_mutation "$(_ "Attach file")" -S "${module_name}" || true
+                    fi
+                fi
+                return 0
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    done
+}
+
+screen_search() {
+    local query=""
+    local stdout_file="${TMP_ROOT}/search.out"
+    local stderr_file="${TMP_ROOT}/search.err"
+    local line=""
+    local fields=()
+    local checklist_args=()
+    local selected_output=""
+    local selections=()
+    local selected=""
+    local idx=1
+    local tag=""
+    local module_name=""
+
+    if ! query="$(dialog_run --inputbox "$(_ "Search")" 8 70)"; then
+        return 0
+    fi
+    [[ -n "${query}" ]] || return 0
+    backend_or_unavailable "$(_ "Online search")" "${stdout_file}" "${stderr_file}" -Ss "${query}" || return 0
+    if [[ ! -s "${stdout_file}" ]]; then
+        show_message "$(_ "No data")"
+        return 0
+    fi
+    sort_file_by_field "${stdout_file}" 1
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        if ! parse_inet_line "${line}" fields; then
+            show_unavailable "$(_ "Online search")"
+            return 0
+        fi
+        tag="$(tag_for_index "${idx}")"
+        checklist_args+=("${tag}" "${fields[0]} | ${fields[3]}" off)
+        idx=$((idx + 1))
+    done <"${stdout_file}"
+    if ! selected_output="$(dialog_run --separate-output --checklist "$(_ "Search results")" 20 120 12 "${checklist_args[@]}")"; then
+        return 0
+    fi
+    selected_lines_to_array "${selected_output}" selections
+    [[ "${#selections[@]}" -gt 0 ]] || return 0
+    if dialog_run --yesno "$(_ "Attach selected modules?")" 8 70 >/dev/null; then
+        for selected in "${selections[@]}"; do
+            module_name="$(search_name_for_tag "${selected}" "${stdout_file}")" || continue
+            run_mutation "$(_ "Attach")" -S "${module_name}" || true
+        done
+    fi
+}
+
+screen_updates() {
+    local stdout_file="${TMP_ROOT}/updates.out"
+    local stderr_file="${TMP_ROOT}/updates.err"
+    local blacklist_file="${TMP_ROOT}/blacklist.out"
+    local blacklist_err="${TMP_ROOT}/blacklist.err"
+    local line=""
+    local fields=()
+    local checklist_args=()
+    local selected_output=""
+    local selections=()
+    local selected=""
+    local action=""
+    local has_system=0
+    local risk=""
+    local state="off"
+    local bl_args=()
+    local identity=""
+    local version=""
+    local idx=1
+    local tag=""
+    local update_id=""
+
+    backend_or_unavailable "$(_ "Updates")" "${stdout_file}" "${stderr_file}" --check-updates || return 0
+    sort_file_by_field "${stdout_file}" 3
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        parse_update_line "${line}" fields || continue
+        risk="${fields[8]}"
+        state="off"
+        [[ "${risk}" != "system" ]] && state="on"
+        tag="$(tag_for_index "${idx}")"
+        case "${risk}" in
+            system)
+                checklist_args+=("${tag}" "${fields[2]} ${fields[3]}→${fields[4]} [$(_ "system, reboot required")]" "${state}")
+                ;;
+            loaded)
+                checklist_args+=("${tag}" "${fields[2]} ${fields[3]}→${fields[4]} [$(_ "after reattach/reboot")]" "${state}")
+                ;;
+            *)
+                checklist_args+=("${tag}" "${fields[2]} ${fields[3]}→${fields[4]}" "${state}")
+                ;;
+        esac
+        idx=$((idx + 1))
+    done <"${stdout_file}"
+    if [[ "${#checklist_args[@]}" -eq 0 ]]; then
+        show_message "$(_ "No data")"
+        return 0
+    fi
+    if ! selected_output="$(dialog_run --separate-output --checklist "$(_ "Updates")" 20 110 12 "${checklist_args[@]}")"; then
+        selected_output=""
+    fi
+    selected_lines_to_array "${selected_output}" selections
+    if ! action="$(dialog_run --menu "$(_ "Updates")" 12 80 4 apply "$(_ "Apply selected")" blacklist "$(_ "Blacklist selected")" edit-blacklist "$(_ "Edit blacklist")" back "$(_ "Back")")"; then
+        return 0
+    fi
+    case "${action}" in
+        apply)
+            [[ "${#selections[@]}" -gt 0 ]] || return 0
+            for selected in "${selections[@]}"; do
+                risk="$(update_field_for_tag "${selected}" "${stdout_file}" 8)" || continue
+                [[ "${risk}" == "system" ]] && has_system=1
+            done
+            if [[ "${has_system}" -eq 1 ]]; then
+                dialog_run --yesno "$(_ "Selected updates include system modules. Continue?")" 8 80 >/dev/null || return 0
+            fi
+            for selected in "${selections[@]}"; do
+                update_id="$(update_field_for_tag "${selected}" "${stdout_file}" 1)" || continue
+                risk="$(update_field_for_tag "${selected}" "${stdout_file}" 8)" || risk="normal"
+                if [[ "${risk}" == "system" ]]; then
+                    run_mutation "$(_ "Update")" --confirm-system-updates --update "${update_id}" || true
+                else
+                    run_mutation "$(_ "Update")" --update "${update_id}" || true
+                fi
+            done
+            ;;
+        blacklist)
+            [[ "${#selections[@]}" -gt 0 ]] || return 0
+            if dialog_run --yesno "$(_ "Add selected updates to blacklist?")" 8 80 >/dev/null; then
+                for selected in "${selections[@]}"; do
+                    update_id="$(update_field_for_tag "${selected}" "${stdout_file}" 1)" || continue
+                    run_mutation "$(_ "Blacklist")" --update-blacklist-add "${update_id}" || true
+                done
+                backend_or_unavailable "$(_ "Updates")" "${stdout_file}" "${stderr_file}" --check-updates || true
+            fi
+            ;;
+        edit-blacklist)
+            backend_or_unavailable "$(_ "Blacklist")" "${blacklist_file}" "${blacklist_err}" --update-blacklist-list || return 0
+            sort_file_by_field "${blacklist_file}" 2
+            while IFS= read -r line; do
+                [[ -n "${line}" ]] || continue
+                split_tsv "${line}" fields
+                [[ "${#fields[@]}" -ge 3 && "${fields[0]}" == "blacklist" ]] || continue
+                bl_args+=("${fields[1]}|${fields[2]}" "${fields[3]:-}" off)
+            done <"${blacklist_file}"
+            [[ "${#bl_args[@]}" -gt 0 ]] || {
+                show_message "$(_ "No data")"
+                return 0
+            }
+            selected_output="$(dialog_run --separate-output --checklist "$(_ "Blacklist")" 20 100 12 "${bl_args[@]}")" || return 0
+            selected_lines_to_array "${selected_output}" selections
+            [[ "${#selections[@]}" -gt 0 ]] || return 0
+            if dialog_run --yesno "$(_ "Remove selected blacklist entries?")" 8 80 >/dev/null; then
+                for selected in "${selections[@]}"; do
+                    identity="${selected%%|*}"
+                    version="${selected#*|}"
+                    run_mutation "$(_ "Blacklist")" --update-blacklist-remove "${identity}" "${version}" || true
+                done
+                backend_or_unavailable "$(_ "Updates")" "${stdout_file}" "${stderr_file}" --check-updates || true
+            fi
+            ;;
+    esac
+}
+
+screen_cleanup() {
+    local stdout_file="${TMP_ROOT}/old.out"
+    local stderr_file="${TMP_ROOT}/old.err"
+    local line=""
+    local fields=()
+    local checklist_args=()
+    local selected_output=""
+    local selections=()
+
+    backend_or_unavailable "$(_ "Clean old .pfs.old files")" "${stdout_file}" "${stderr_file}" --list-old || return 0
+    sort_file_by_field "${stdout_file}" 1
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        if [[ "${line}" == *$'\t'* ]]; then
+            split_tsv "${line}" fields
+            [[ "${#fields[@]}" -eq 2 && "${fields[0]}" == "old" ]] || {
+                show_unavailable "$(_ "Clean old .pfs.old files")"
+                return 0
+            }
+            checklist_args+=("${fields[1]}" "old" off)
+        else
+            checklist_args+=("${line}" "old" off)
+        fi
+    done <"${stdout_file}"
+    [[ "${#checklist_args[@]}" -gt 0 ]] || {
+        show_message "$(_ "No data")"
+        return 0
+    }
+    selected_output="$(dialog_run --separate-output --checklist "$(_ "Clean old .pfs.old files")" 20 120 12 "${checklist_args[@]}")" || return 0
+    selected_lines_to_array "${selected_output}" selections
+    [[ "${#selections[@]}" -gt 0 ]] || return 0
+    if dialog_run --yesno "$(_ "Remove selected .old files?")" 8 80 >/dev/null; then
+        run_mutation "$(_ "Cleanup")" --remove-old "${selections[@]}" || true
+    fi
+}
+
+screen_about() {
+    local action=""
+
+    if ! action="$(dialog_run --menu "$(_ "Settings / About")" 12 80 4 config "$(_ "Show config path")" about "$(_ "About")" back "$(_ "Back")")"; then
+        return 0
+    fi
+    case "${action}" in
+        config)
+            rows_to_textbox "$(_ "Configuration")" "/etc/modman.conf
+$(_ "A local modman.conf in the current directory can take precedence.")
+$(_ "MODMAN_CONF can override the path when supported by the backend.")"
+            ;;
+        about)
+            show_message "modman-tui ${VERSION}\nBackend: ${MODMAN_BIN_RESOLVED}\nDialog: ${DIALOG_BIN_RESOLVED}\n$(_ "TUI calls only modman --machine.")"
+            ;;
+    esac
+}
+
+main_menu() {
+    dialog_run --menu "$(_ "Module manager")" 20 80 10 \
+        connected "$(_ "Connected")" \
+        system "$(_ "System")" \
+        local "$(_ "Local")" \
+        search "$(_ "Online search")" \
+        updates "$(_ "Updates")" \
+        cleanup "$(_ "Clean old .pfs.old files")" \
+        about "$(_ "Settings / About")" \
+        exit "$(_ "Exit")"
+}
+
+run_app() {
+    local choice=""
+
+    MODMAN_BIN_RESOLVED="$(find_modman)" || die "modman not found; set MODMAN_BIN or install modman"
+    DIALOG_BIN_RESOLVED="$(find_dialog)" || die "dialog not found; set DIALOG_BIN or install dialog"
+    tmp_init
+
+    while true; do
+        if ! choice="$(main_menu)"; then
+            exit 0
+        fi
+        case "${choice}" in
+            connected) screen_loaded "$(_ "Connected")" --list-loaded-after ;;
+            system) screen_loaded "$(_ "System")" --list-loaded-before ;;
+            local) screen_local ;;
+            search) screen_search ;;
+            updates) screen_updates ;;
+            cleanup) screen_cleanup ;;
+            about) screen_about ;;
+            exit) exit 0 ;;
+        esac
+    done
+}
+
+case "${1:-}" in
+    --help | -h)
+        usage
+        exit 0
+        ;;
+    --version)
+        printf 'modman-tui %s\n' "${VERSION}"
+        exit 0
+        ;;
+    "")
+        run_app
+        ;;
+    *)
+        printf 'modman-tui: unknown option: %s\n' "$1" >&2
+        usage >&2
+        exit 1
+        ;;
+esac
