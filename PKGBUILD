@@ -1,38 +1,68 @@
 # Maintainer: sfs <sfslinux@gmail.com>
-# VCS (git) build variant of the modman package set.
-# Builds modman / modman-gui / modman-tui from the upstream git repository
-# instead of the local working tree.
-#
-# Source repo: https://github.com/sfs-pra/modman
-# Usage:       makepkg -p PKGBUILD.git
-#
-# Differs from ./PKGBUILD only in source acquisition: the whole tree
-# (src/, include/, docs/, po/, data/, systemd/, ...) arrives via the git
-# clone, so the flat source[] list and the staging prepare() are not needed.
+
 pkgbase=modman
 pkgname=('modman' 'modman-gui' 'modman-tui')
-_gitname=modman
-_basever=2026.04
 pkgver=2026.04
 pkgrel=53
 pkgdesc="Module manager for any frugal / live-CD Linux"
 arch=('x86_64' 'aarch64')
-url="https://github.com/sfs-pra/modman"
+url="http://mirror.yandex.ru/puppyrus/"
 license=('MIT')
-makedepends=('git' 'gcc' 'pkgconf' 'check' 'bats' 'shellcheck' 'gettext')
-source=("${_gitname}::git+https://github.com/sfs-pra/modman.git")
-sha256sums=('SKIP')
+makedepends=('gcc' 'pkgconf' 'check' 'bats' 'shellcheck' 'gettext')
 
-pkgver() {
-    cd "$srcdir/$_gitname"
-    local _count _hash
-    _count="$(git rev-list --count HEAD 2>/dev/null || printf '0')"
-    _hash="$(git rev-parse --short HEAD 2>/dev/null || printf '0000000')"
-    printf '%s.r%s.g%s' "$_basever" "$_count" "$_hash"
+# Only flat (top-level) loose files in source[]. Sub-directory trees
+# (systemd/, include/, src/, tests/, docs/) are staged into $srcdir by
+# prepare() below so that makepkg variants that reject path-in-source
+# entries still build correctly.
+source=('modman'
+        'modman-tui'
+        'modman-selftest'
+        'modman-update-check'
+        'modman.conf'
+        'modman.desktop'
+        'modman-open.desktop'
+        'modman-update-check.desktop'
+        '40-modman.rules'
+        'LICENSE')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+prepare() {
+    # Stage subdirectory trees into $srcdir. Two build modes:
+    # 1. Out-of-tree (default): $srcdir is a fresh dir; cp subdirs into it.
+    # 2. In-place / archroot: $srcdir IS $startdir/src/; the .c/.h files
+    #    already live AT $srcdir/*.c (not $srcdir/src/*.c), so we expose
+    #    them as $srcdir/src/*.c via symlinks so build()/check() find them
+    #    at the hard-coded "src/" relative path.
+    local srcdir_real startdir_real src_real f base
+    srcdir_real="$(realpath "$srcdir" 2>/dev/null)"
+    startdir_real="$(realpath "$startdir" 2>/dev/null)"
+
+    for dir in systemd include src tests docs po data; do
+        [ -d "$startdir/$dir" ] || continue
+        src_real="$(realpath "$startdir/$dir" 2>/dev/null)"
+
+        # In-place build: $startdir/$dir IS $srcdir → re-expose top-level
+        # source files as $srcdir/$dir/<file> via symlinks so build paths
+        # like "src/main.c" resolve. Currently only .c/.h are needed.
+        if [ -n "$src_real" ] && [ "$src_real" = "$srcdir_real" ]; then
+            mkdir -p "$srcdir/$dir"
+            for f in "$srcdir"/*.c "$srcdir"/*.h; do
+                [ -f "$f" ] || continue
+                base="$(basename "$f")"
+                ln -sfn "$f" "$srcdir/$dir/$base"
+            done
+            continue
+        fi
+
+        # Skip if already populated (re-prepare or earlier iteration)
+        [ -d "$srcdir/$dir" ] && [ -n "$(ls -A "$srcdir/$dir" 2>/dev/null)" ] && continue
+
+        cp -a "$startdir/$dir" "$srcdir/"
+    done
 }
 
 build() {
-    cd "$srcdir/$_gitname"
+    cd "$srcdir"
 
     local -a CFLAGS_EX=(
         -Wall
@@ -65,7 +95,7 @@ build() {
 }
 
 check() {
-    cd "$srcdir/$_gitname"
+    cd "$srcdir"
 
     bash -n modman modman-tui modman-selftest modman-update-check
 
@@ -104,7 +134,7 @@ package_modman() {
     provides=('modman')
     backup=('etc/modman.conf')
 
-    cd "$srcdir/$_gitname"
+    cd "$srcdir"
     local lang
 
     install -dm755 "$pkgdir/usr/bin"
@@ -133,8 +163,8 @@ package_modman() {
     install -m644 docs/ru/modman.8 "$pkgdir/usr/share/man/ru/man8/modman.8"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 
-    for lang in $(cat "$srcdir/$_gitname/po/LINGUAS"); do
-        install -Dm644 "$srcdir/$_gitname/po/${lang}.mo" \
+    for lang in $(cat "$srcdir/po/LINGUAS"); do
+        install -Dm644 "$srcdir/po/${lang}.mo" \
             "$pkgdir/usr/share/locale/${lang}/LC_MESSAGES/modman.mo"
     done
 }
@@ -145,7 +175,7 @@ package_modman-gui() {
     optdepends=('squashfs-tools: show SquashFS details in modman-open'
                 'erofs-utils: show EROFS details in modman-open')
 
-    cd "$srcdir/$_gitname"
+    cd "$srcdir"
 
     install -dm755 "$pkgdir/usr/bin"
     install -dm755 "$pkgdir/usr/share/applications"
@@ -171,7 +201,7 @@ package_modman-tui() {
     optdepends=('squashfs-tools: show SquashFS compression details for local modules'
                 'erofs-utils: show EROFS compression details for local modules')
 
-    cd "$srcdir/$_gitname"
+    cd "$srcdir"
 
     install -dm755 "$pkgdir/usr/bin"
     install -dm755 "$pkgdir/usr/share/man/man8"
@@ -184,8 +214,8 @@ package_modman-tui() {
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 
     local lang
-    for lang in $(cat "$srcdir/$_gitname/po/modman-tui/LINGUAS"); do
-        install -Dm644 "$srcdir/$_gitname/po/modman-tui/${lang}.mo" \
+    for lang in $(cat "$srcdir/po/modman-tui/LINGUAS"); do
+        install -Dm644 "$srcdir/po/modman-tui/${lang}.mo" \
             "$pkgdir/usr/share/locale/${lang}/LC_MESSAGES/modman-tui.mo"
     done
 }
