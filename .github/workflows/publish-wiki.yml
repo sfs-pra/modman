@@ -1,9 +1,9 @@
 # Publishes the documentation to the repository's GitHub Wiki.
 #
 # Single source of truth: docs/*.dokuwiki. On every push that touches a
-# DokuWiki source (or the converter), this workflow regenerates the MediaWiki
-# pages with docs/dokuwiki2mediawiki.py and mirrors them into the wiki repo.
-# The generated *.mediawiki files are build artifacts (git-ignored).
+# DokuWiki source (or the converter), this workflow regenerates the Markdown
+# pages with docs/dokuwiki2markdown.py and mirrors them into the wiki repo.
+# The generated _wiki/*.md files are build artifacts (git-ignored).
 #
 # Prerequisites (one-time, manual):
 #   1. Settings -> Features -> enable "Wikis".
@@ -18,7 +18,7 @@ on:
     branches: [master, main]
     paths:
       - "docs/*.dokuwiki"
-      - "docs/dokuwiki2mediawiki.py"
+      - "docs/dokuwiki2markdown.py"
       - ".github/workflows/publish-wiki.yml"
   workflow_dispatch:
 
@@ -36,9 +36,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate MediaWiki pages from DokuWiki sources
+      - name: Generate Markdown pages from DokuWiki sources
         run: |
-          python3 docs/dokuwiki2mediawiki.py --out-dir _wiki docs/*.dokuwiki
+          python3 docs/dokuwiki2markdown.py --out-dir _wiki docs/*.dokuwiki
 
       - name: Clone wiki repository
         run: |
@@ -50,18 +50,17 @@ jobs:
       - name: Sync generated pages into the wiki
         run: |
           shopt -s nullglob
-          for f in _wiki/*.mediawiki; do
-            base="$(basename "$f" .mediawiki)"
+          for f in _wiki/*.md; do
+            base="$(basename "$f" .md)"
             # modman is the project landing page; others keep their slug.
             if [ "$base" = "modman" ]; then
               dest="Home"
             else
               dest="$base"
             fi
-            # Gollum treats Home.md and Home.mediawiki as duplicate pages; keep only ours.
-            find wiki -maxdepth 1 -type f -name "${dest}.*" ! -name "${dest}.mediawiki" -delete
-            cp "$f" "wiki/${dest}.mediawiki"
-            echo "synced $f -> ${dest}.mediawiki"
+            find wiki -maxdepth 1 -type f -name "${dest}.*" ! -name "${dest}.md" -delete
+            cp "$f" "wiki/${dest}.md"
+            echo "synced $f -> ${dest}.md"
           done
 
       - name: Commit and push wiki changes
