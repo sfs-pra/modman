@@ -202,9 +202,8 @@ update<TAB>id<TAB>name<TAB>old_version<TAB>new_version<TAB>installed_path<TAB>ca
 активному mount. На overlay-root системах системное горячее подключение
 недоступно; используйте `pfsrun` (приватный mount namespace), чтобы запустить
 приложение с модулем. Полный обзор:
-[`docs/aufs-alternatives.ru.md`](docs/aufs-alternatives.ru.md)
-([English](docs/aufs-alternatives.md) /
-[dokuwiki](docs/aufs-alternatives.dokuwiki)).
+[обзор AUFS-альтернатив в вики pfs-utils](https://github.com/sfs-pra/pfs-utils-05/wiki/aufs-alternatives-ru)
+([English](https://github.com/sfs-pra/pfs-utils-05/wiki/aufs-alternatives)).
 
 ---
 
@@ -349,12 +348,12 @@ modman --update-blacklist-add evince-3.26.0.pfs     # заблокировать
 
 ## Документация
 
-- [`docs/modman.dokuwiki`](docs/modman.dokuwiki) — полная справка CLI / GUI
+- **[Вики проекта](https://github.com/sfs-pra/modman/wiki)** — отрендеренная документация
+- [`docs/modman.dokuwiki`](docs/modman.dokuwiki) — полная справка CLI / GUI (источник вики)
 - [`docs/modman-architecture.md`](docs/modman-architecture.md) — контракты GUI
-- [`docs/aufs-alternatives.ru.md`](docs/aufs-alternatives.ru.md) — обзор
-  динамической загрузки AUFS против OverlayFS
+- [обзор динамической загрузки AUFS против OverlayFS](https://github.com/sfs-pra/pfs-utils-05/wiki/aufs-alternatives-ru) — в вики pfs-utils
 - Man-страницы: `modman(8)`, `modman.conf(5)`, `modman-open(1)`, `modman-tui(8)`
-- [Документация `pfs-utils`](https://github.com/sfs-pra/pfs-utils-05)
+- [Вики и исходники `pfs-utils`](https://github.com/sfs-pra/pfs-utils-05/wiki)
 
 ---
 

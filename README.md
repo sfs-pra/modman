@@ -198,9 +198,8 @@ Add a new type by dropping `50-yourname.sh` into
 (`mount -o remount,append:`). OverlayFS **cannot** add a `lowerdir` to an
 active mount. On overlay-root systems, system-wide hot-load is unavailable;
 use `pfsrun` (private mount namespace) to run an app with a module instead.
-Full survey: [`docs/aufs-alternatives.md`](docs/aufs-alternatives.md)
-([на русском](docs/aufs-alternatives.ru.md) /
-[dokuwiki](docs/aufs-alternatives.dokuwiki)).
+Full survey: [AUFS-alternatives survey in the pfs-utils wiki](https://github.com/sfs-pra/pfs-utils-05/wiki/aufs-alternatives)
+([Русский](https://github.com/sfs-pra/pfs-utils-05/wiki/aufs-alternatives-ru)).
 
 ---
 
@@ -346,12 +345,12 @@ See [`modman.conf(5)`](docs/modman.conf.5) for the full reference.
 
 ## Documentation
 
-- [`docs/modman.dokuwiki`](docs/modman.dokuwiki) — full CLI / GUI reference
+- **[Project wiki](https://github.com/sfs-pra/modman/wiki)** — rendered, browsable documentation
+- [`docs/modman.dokuwiki`](docs/modman.dokuwiki) — full CLI / GUI reference (wiki source)
 - [`docs/modman-architecture.md`](docs/modman-architecture.md) — GUI contracts
-- [`docs/aufs-alternatives.md`](docs/aufs-alternatives.md) — AUFS vs. OverlayFS
-  dynamic-load survey
+- [AUFS vs. OverlayFS dynamic-load survey](https://github.com/sfs-pra/pfs-utils-05/wiki/aufs-alternatives) — in the pfs-utils wiki
 - Man pages: `modman(8)`, `modman.conf(5)`, `modman-open(1)`, `modman-tui(8)`
-- [`pfs-utils` documentation](https://github.com/sfs-pra/pfs-utils-05)
+- [`pfs-utils` wiki & sources](https://github.com/sfs-pra/pfs-utils-05/wiki)
 
 ---
 

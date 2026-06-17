@@ -1,5 +1,6 @@
 # Compiled binaries
 modman-gui
+modman-open
 *.o
 *.a
 
@@ -29,9 +30,12 @@ build/
 
 # Arch packaging artefacts
 *.pkg.tar.zst
-src/
 pkg/
 
 # Generated wiki pages (built from docs/*.dokuwiki by docs/dokuwiki2mediawiki.py)
 docs/*.mediawiki
 _wiki/
+
+# Python bytecode cache
+__pycache__/
+*.pyc

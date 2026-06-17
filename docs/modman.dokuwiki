@@ -4,7 +4,7 @@
   * **modman-gui** — отдельный optional-пакет с GTK3 frontend.
   * **modman-tui** — отдельный optional-пакет с dialog frontend.
   * **modman-open**: GTK3 opener из пакета ''modman-gui'' для одного ''.pfs'' из файлового менеджера. Только inspect/подключение/отключение через ''modman'', без вкладок, поиска, каталога и package extraction.
-  * Работает поверх [[man:pfs-utils(8)|pfs-utils]] v5: все файловые операции делегируются ''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfsbench''.
+  * Работает поверх [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils]] v5: все файловые операции делегируются ''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfsbench''.
   * Поддерживает initrd-стеки: **rootaufs2**, **UIRD**, **Porteus**, **livekit** — через plugin-детекторы pfs-utils.
   * Машинный контракт (''--machine'' TSV) стабилен для GUI и скриптов: поля разделяются табами и не зависят от локали.
   * [[http://forum.puppyrus.org/index.php?board=176.0|Обсуждение]]
@@ -71,7 +71,7 @@ TUI следует тому же правилу: он не вызывает ''pf
   * ''$XDG_CONFIG_HOME/modman/modman.conf'' — XDG-путь (наивысший приоритет).
   * ''/usr/share/modman/modman.conf'' — системные умолчания (наименьший приоритет).
 
-Подробнее: [[man:modman.conf(5)]].
+Подробнее: ''modman.conf(5)''.
 
 ==== Ключевые переменные ====
 
@@ -551,10 +551,10 @@ sudo modman -d /tmp/modman-cache -S evince
 
 ====== See also ======
 
-  * [[man:modman(8)]] — полная справка по CLI
-  * [[man:modman.conf(5)]] — справка по конфигурации
-  * [[man:pfs-utils(8)]] — документация pfs-utils v5
-  * [[man:pfsload(8)]], [[man:pfsunload(8)]], [[man:pfsinfo(8)]], [[man:pfsbench(8)]]
-  * [[pfs-utils.dokuwiki|pfs-utils dokuwiki]] — документация pfs-utils
+  * ''modman(8)'' — полная справка по CLI
+  * ''modman.conf(5)'' — справка по конфигурации
+  * ''pfs-utils(8)'' — документация pfs-utils v5
+  * ''pfsload(8)'', ''pfsunload(8)'', ''pfsinfo(8)'', ''pfsbench(8)''
+  * [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils wiki]] — документация pfs-utils
   * [[http://forum.puppyrus.org/index.php?board=176.0|Обсуждение на форуме]]
   * ADR: ''docs/adr/0001-layering-dispatch.md'', ''docs/adr/0002-v4-backward-compat.md''

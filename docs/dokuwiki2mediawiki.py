@@ -51,7 +51,7 @@ def convert_inline(text):
 
     # 2. drop decorative DokuWiki smileys
     for s in SMILEYS:
-        text = text.replace(' ' + s, '').replace(s, '')
+        text = text.replace(s + ' ', '').replace(' ' + s, '').replace(s, '')
 
     # 3. inline emphasis (order matters: monospace before bold/italic)
     text = re.sub(r"''(.+?)''", lambda m: '<code>%s</code>' % m.group(1), text)
@@ -122,7 +122,7 @@ def convert_line(line):
         level = max(1, len(m.group(1)) // 2)
         mark = ('*' if m.group(2) == '*' else '#') * level
         return '%s %s' % (mark, convert_inline(m.group(3)))
-    return convert_inline(line)
+    return convert_inline(line.lstrip())
 
 
 def convert(text):
@@ -158,6 +158,14 @@ def convert(text):
             quote_buf.append(qm.group(1))
             continue
         flush_quote(quote_buf, out)
+        if (raw[:1] in (' ', '\t') and raw.strip()
+                and not re.match(r'^(\s*)([*-])\s+', raw)
+                and not re.match(r'^\s*(={2,6})', raw)
+                and not re.match(r'^\s*-{4,}\s*$', raw)
+                and not re.match(r'^\s*-\s+-{3,}\s*$', raw)
+                and out and re.match(r'^[*#]+ ', out[-1])):
+            out[-1] = out[-1] + ' ' + convert_inline(raw.strip())
+            continue
         out.append(convert_line(raw))
     flush_table(table_buf, out)
     flush_quote(quote_buf, out)
