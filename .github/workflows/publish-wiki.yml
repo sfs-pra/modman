@@ -58,6 +58,8 @@ jobs:
             else
               dest="$base"
             fi
+            # Gollum treats Home.md and Home.mediawiki as duplicate pages; keep only ours.
+            find wiki -maxdepth 1 -type f -name "${dest}.*" ! -name "${dest}.mediawiki" -delete
             cp "$f" "wiki/${dest}.mediawiki"
             echo "synced $f -> ${dest}.mediawiki"
           done
