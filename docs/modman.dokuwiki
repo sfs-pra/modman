@@ -1,560 +1,252 @@
-====== modman. Менеджер pfs-модулей для frugal / live-CD Linux ======
+====== modman. Module manager for frugal / live-CD Linux ======
 
-  * **modman** — CLI-бэкенд для управления squashfs/erofs pfs-модулями в frugal-дистрибутивах на базе AUFS/OverlayFS.
-  * **modman-gui** — отдельный optional-пакет с GTK3 frontend.
-  * **modman-tui** — отдельный optional-пакет с dialog frontend.
-  * **modman-open**: GTK3 opener из пакета ''modman-gui'' для одного ''.pfs'' из файлового менеджера. Только inspect/подключение/отключение через ''modman'', без вкладок, поиска, каталога и package extraction.
-  * Работает поверх [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils]] v5: все файловые операции делегируются ''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfsbench''.
-  * Поддерживает initrd-стеки: **rootaufs2**, **UIRD**, **Porteus**, **livekit** — через plugin-детекторы pfs-utils.
-  * Машинный контракт (''--machine'' TSV) стабилен для GUI и скриптов: поля разделяются табами и не зависят от локали.
-  * [[http://forum.puppyrus.org/index.php?board=176.0|Обсуждение]]
-  * [[https://github.com/sfs-pra/modman|Скачать / исходники]]
+**Language:** English | [[Home-ru|Русский]]
 
-====== Обзор архитектуры ======
+  * **modman** is a CLI backend for managing squashfs/erofs PFS modules on frugal / live-CD Linux systems that use AUFS or OverlayFS.
+  * **modman-gui** is an optional GTK3 frontend.
+  * **modman-tui** is an optional dialog-based terminal frontend.
+  * **modman-open** is a GTK3 file-manager opener for one local ''.pfs'' file. It supports inspect/load/unload through ''modman'' only; it does not replace the full manager.
+  * Runtime filesystem work is delegated to [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils]] v5: ''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfsbench'' and related tools.
+  * Supported boot stacks are detected through pfs-utils: **rootaufs2**, **UIRD**, **Porteus**, and **livekit**.
+  * The ''--machine'' TSV contract is stable for GUI, TUI and scripts. Fields are tab-separated and locale-independent.
+  * [[http://forum.puppyrus.org/index.php?board=176.0|Discussion]]
+  * [[https://github.com/sfs-pra/modman|Download / sources]]
 
-modman — трёхуровневая система:
+====== Architecture overview ======
 
-  - **pfs-utils v5** — runtime-слой: AUFS/OverlayFS mount/unmount, определение формата и режима запуска.
-  - **modman** (Bash CLI) — контрактный слой: machine-схема, маршрутизация команд, валидация, вызов ''pfs*''.
-  - **modman-gui** (GTK3 C) — опциональный слой представления: асинхронные операции, отмена, debounce поиска.
-  - **modman-tui** (Bash + dialog) — опциональный терминальный frontend; отдельный пакет, только вызовы ''modman --machine''.
+modman is a three-tier system:
 
-GUI не обращается к файловым слоям напрямую — все операции проходят через ''modman --machine''.
-TUI следует тому же правилу: он не вызывает ''pfs*'', ''pacman'', ''sudo'' или ''pkexec'' напрямую.
-''modman-open'' следует тому же контракту: открывает ровно один локальный ''.pfs'', использует desktop-файл ''modman-open.desktop'' с ''Exec=modman-open %f'' и MIME ''application/x-pfs'', а runtime-действия отдаёт в ''modman''. Устанавливается вместе с пакетом ''modman-gui''.
+  - **pfs-utils v5** — runtime layer: AUFS/OverlayFS mount and unmount, format detection, boot-stack detection, module build/extract helpers.
+  - **modman** (Bash CLI) — contract layer: machine schema, command routing, validation, dependency handling, calls to ''pfs*'' tools.
+  - **modman-gui** (GTK3 C) — optional presentation layer: asynchronous operations, cancellation, debounced search, details panes and polkit integration.
+  - **modman-tui** (Bash + dialog) — optional terminal frontend. It calls only ''modman --machine''.
 
-====== Терминальный интерфейс modman-tui ======
+Frontends do not access filesystem layers directly. GUI, TUI and file opener all go through ''modman --machine''.
 
-''modman-tui'' — отдельный optional-пакет для работы в терминале через ''dialog''.
+====== Components ======
 
-  * Подключенные: ''modman --machine --list-loaded-after'', отключение только после подтверждения через ''-R <name>''.
-  * Система: ''--list-loaded-before'', просмотр деталей и отключение через ''-R <name>'' после подтверждения.
-  * Локальные: ''--list-local'', подключение через ''-S'', удаление через ''--remove-local'' после подтверждения.
-  * Инет / поиск: ''-Ss <query>'', установка выбранного через ''-S'' после подтверждения.
-  * Обновления и ЧС: ''--check-updates'', ''--update'', ''--update-blacklist-*''; system-обновления требуют отдельного подтверждения.
-  * Очистка ''.pfs.old'': только через ''--list-old'' и ''--remove-old'', без прямого удаления файлов.
+^ Package ^ Binary ^ Role ^ Depends on ^
+| ''modman'' | ''modman'' | CLI backend and ''--machine'' contract | ''bash'', ''pfs-utils-cli >= 2026.04'' |
+| ''modman-gui'' | ''modman-gui'', ''modman-open'' | GTK3 manager and file opener | ''modman'', ''gtk3'', ''glib2'', ''polkit'' |
+| ''modman-tui'' | ''modman-tui'' | dialog terminal frontend | ''modman'', ''dialog'', ''gettext'' |
 
-Переменные для тестов и окружения: ''MODMAN_BIN'', ''DIALOG_BIN'', ''MODMAN_TUI_TMPDIR''.
+====== Core concepts ======
 
-====== Файловый opener modman-open ======
+===== Modules and identity =====
 
-''modman-open'' предназначен для сценария "Открыть с помощью" в файловом менеджере. Поддерживаемый MIME: ''application/x-pfs''. Desktop-интеграция должна оставаться одиночной: ''modman-open.desktop'' содержит ''Exec=modman-open %f'' и ''MimeType=application/x-pfs;''.
+  * **Module** — a squashfs or erofs archive containing a filesystem tree rooted at ''/''.
+  * **PFS module** — a module built by **mkpfs** or **mkpfs-erofs**. It carries metadata such as ''pfs.files'', ''pfs.specs'' and ''pfs.depends''.
+  * **Simple module** — built from one source.
+  * **Composite module** — built from several sources and later split/extracted by pfs-utils.
+  * **identity** — the short cache key derived from the filename by trimming version, architecture and revision tags.
 
-Поддерживаемый scope: показать один локальный ''.pfs'', подключить его через ''modman -S <path>'' и отключить через ''modman -R <name>''. Это не замена ''modman-gui'': нет вкладок, поиска, каталога, обновлений, batch-open и управления несколькими файлами. Legacy package checkbox install flow и package extraction не поддерживаются.
+<code text>
+evince-gtk3-p-3.26.0_64-sf06.pfs  ->  evince-gtk3-p
+030-gtk3-2601-sf03.pfs            ->  030-gtk3
+</code>
 
-Проверки упаковки описаны в ''docs/modman-open-packaging.md''. Валидаторы запускаются только если установлены, но их отсутствие должно быть записано в evidence.
+===== Module states =====
 
-====== Что нового: управление обновлениями ======
+^ State ^ Source command ^ Meaning ^
+| Loaded before | ''modman --list-loaded-before'' / ''-Lb'' | Base modules attached by initrd. Unloading mutates the running base. |
+| Loaded after | ''modman --list-loaded-after'' / ''-La'' | Hot-attached at runtime. Safe to unload. |
+| Local | ''modman --list-local'' / ''-Ql'' | Downloaded ''.pfs'' files that are not attached. |
+| Repo / online | ''modman -Ss <query>'' | Remote search results overlaid with matching local files. |
 
-  * :!: **--check-updates** — безопасная проверка без root, никогда не изменяет файлы.
-  * :!: **--update <id>** / **--update-all** — применение обновлений с резервными копиями (.old).
-  * **--confirm-system-updates** — явное разрешение обновления системных модулей (risk=system).
-  * **--verbose-skips** — вывод строк ''skipped'' для пропущенных модулей.
-  * **--include-blacklisted** — включение заблокированных версий в вывод.
-  * Чёрный список: **--update-blacklist-add**, **--update-blacklist-remove**, **--update-blacklist-list**.
-  * Автопроверка при входе через **modman-update-check** (XDG autostart, только уведомление).
+These states map directly to the GUI tabs: **Подключенные**, **Инет**, **Локальные**, **Система**.
 
-====== Терминология и формат PFS ======
+====== Command-line interface ======
 
-  * **Модуль** — squashfs (или erofs) архив с деревом файлов от корня системы для одной или нескольких программ. При подключении через AUFS файлы становятся доступны в системе.
-  * **PFS-модуль** — модуль, собранный утилитой **mkpfs** (или **mkpfs-erofs**). Содержит метаданные: ''pfs.files'', ''pfs.specs'', ''pfs.depends''.
-  * **Простой модуль** — собран из одного источника.
-  * **Составной модуль** — собран из нескольких источников (контейнер).
-  * **identity** — короткое имя модуля, ключ кэша. Получается из имени файла обрезкой версии, архитектуры и тегов ревизии.
+All common operations support two dialects:
 
-:!: **Внимание!** Не используйте пробелы и спецсимволы shell в именах файлов и путях.
+  * **pacman-style**: ''modman -S'', ''modman -R'', ''modman -Ss'', ''modman -Sy''.
+  * **apt-style**: ''modman install'', ''modman remove'', ''modman search'', ''modman update''.
 
-===== Конфигурационные файлы =====
+===== Quickstart =====
 
-  * ''/etc/modman.conf'' — общесистемная конфигурация (приоритет ниже пользовательской).
-  * ''~/.config/modman/modman.conf'' — пользовательское переопределение.
-  * ''$XDG_CONFIG_HOME/modman/modman.conf'' — XDG-путь (наивысший приоритет).
-  * ''/usr/share/modman/modman.conf'' — системные умолчания (наименьший приоритет).
-
-Подробнее: ''modman.conf(5)''.
-
-==== Ключевые переменные ====
-
-  * //DOWNLOAD_DIR=// — каталог для скачанных модулей. Для rootaufs2 автоопределяется как ''/mnt/home/${dir}/optional''.
-  * //AUFS_INITRD_PREFIX=// — префикс для определения initrd-модулей. Для rootaufs2: ''/run/archroot/live/memory/images''.
-  * //MODMAN_IGNORE_DEPS=// — glob-паттерны зависимостей, которые нужно пропускать (например, ''030-*'' если они встроены в базовый модуль).
-  * //EXT=// — расширение контейнеров модулей. По умолчанию ''pfs''.
-  * //CLI_STYLE=// — диалект CLI: ''pacman'' (по умолчанию) или ''apt''.
-  * //UPDATE_CHECK_ON_LOGIN=// — ''1'' (включено) или ''0'' (отключено). Управляет автопроверкой при входе.
-  * //UPDATE_CHECK_OPEN_GUI=// — ''0'' (только notify-send) или ''1'' (открыть GUI с вкладкой обновлений).
-  * //MODMAN_STATE_DIR=// — постоянное состояние modman. По умолчанию ''/var/lib/modman''.
-  * //UPDATE_BLACKLIST_FILE=// — путь к TSV-файлу чёрного списка обновлений.
-    По умолчанию ''${MODMAN_STATE_DIR}/update-blacklist.tsv''.
-    Старый ''${CACHE_DIR}/update-blacklist.tsv'' копируется в новый путь при
-    следующей операции.
-
-====== Консольные команды ======
-
-Все команды поддерживают два диалекта: **pacman-style** (''modman -S'', ''modman -R'', ...) и **apt-style** (''modman install'', ''modman remove'', ...).
-
-===== Синхронизация кэша =====
-
-Загружает ''000-index.txt'' и ''000-dependencies.txt'' из репозитория.
-
-<code>
+<code bash>
+# Sync the index cache with mirrors
 modman -Sy
-# apt-style:
-modman update
-</code>
 
-===== Поиск =====
-
-Поиск подстроки в локальном индексе.
-
-<code>
+# Search the repository
 modman -Ss evince
-# apt-style:
-modman search evince
-</code>
 
-===== Установка модуля =====
-
-Разрешает зависимости, скачивает и подключает модуль через ''pfsload''.
-
-<code>
+# Install: resolve dependencies, download, attach via pfsload
 sudo modman -S evince
-# apt-style:
-sudo modman install evince
-</code>
 
-Установка локального файла (поиск в кэше и загрузка пропускаются):
-
-<code>
-sudo modman -S /mnt/sr0/zz2601/modules/+/openssh-2601.pfs
-sudo modman -S ./openssh-2601.pfs
-</code>
-
-Переопределение каталога загрузки (если автоопределённый путь только для чтения):
-
-<code>
-sudo modman -d /tmp/modman-cache -S evince
-</code>
-
-===== Удаление модуля =====
-
-Находит загруженный модуль и выполняет ''pfsunload''. Принимает точное имя, короткое имя или префикс.
-
-<code>
-sudo modman -R evince
-# apt-style:
-sudo modman remove evince
-</code>
-
-===== Листинг =====
-
-==== Загруженные модули ====
-
-<code>
-modman --list-loaded
-modman -L
-</code>
-
-В режиме ''--machine'' каждая строка содержит 6 TAB-разделённых полей:
-
-<code>
-name	layer	path	version	mount_mode	mount_in_ram
-</code>
-
-==== Модули, загруженные initrd (до старта системы) ====
-
-<code>
-modman --list-loaded-before
-modman -Lb
-</code>
-
-==== Модули, загруженные после старта системы ====
-
-<code>
+# List modules attached after boot
 modman --list-loaded-after
-modman -La
+
+# Detach a runtime module
+sudo modman -R evince
+
+# Remove a downloaded local file
+modman -Rl evince
 </code>
 
-==== Локальные файлы ====
+===== Load-mode and path overrides =====
 
-<code>
-modman --list-local
-modman -Ql
+<code bash>
+sudo modman --lower -S evince          # attach to the lower AUFS layer
+sudo modman --toram -S evince          # copy into tmpfs before mounting
+sudo modman -d /tmp/modman-cache -S evince
+sudo modman -S /path/to/module.pfs
 </code>
 
-===== Удаление локальных файлов =====
+====== The --machine contract ======
 
-Удаляет скачанные ''*.pfs'' файлы из ''DOWNLOAD_DIR''. Смонтированные модули отклоняются.
+''--machine'' switches stdout to tab-separated values, suppresses colored human messages and keeps diagnostics on stderr. It is the only API consumed by GUI and TUI.
 
-<code>
-modman --remove-local evince
-modman -Rl evince evince-gtk3-p
+Loaded-module listing uses six fields:
+
+<code text>
+name<TAB>layer<TAB>path<TAB>version<TAB>mount_mode<TAB>mount_in_ram
 </code>
 
-Машинный вывод (''--machine'', TSV):
+Update check uses eleven fields:
 
-<code>
-removed	<имя>	<путь>
-error	mounted	<имя>
-error	not_found	<имя>	<путь>
-error	invalid_name	<имя>
-error	rm_failed	<имя>
+<code text>
+update<TAB>id<TAB>name<TAB>old_version<TAB>new_version<TAB>installed_path<TAB>candidate_filename<TAB>repo<TAB>risk<TAB>reboot_required<TAB>message
 </code>
 
-====== Управление обновлениями ======
+The ''risk'' field classifies each update:
 
-===== Проверка обновлений =====
+  * **normal** — module is not loaded in the current session.
+  * **loaded** — module is hot-attached at runtime; update is safe and takes effect after reboot.
+  * **system** — module is attached by initrd; applying it requires ''--confirm-system-updates''.
 
-Безопасная проверка без root. Никогда не изменяет файлы.
+When ''reboot_required=1'', modman appends the literal line ''нужна перезагрузка'' to machine output. Parsers must match it verbatim. Reboot is never performed automatically.
 
-<code>
+====== GUI, TUI and opener ======
+
+===== modman-gui =====
+
+''modman-gui'' is the full GTK3 manager. It uses asynchronous cancellable backend calls and parses only ''modman --machine'' output.
+
+<code bash>
+modman-gui
+modman-gui --updates
+</code>
+
+===== modman-open =====
+
+''modman-open'' is for file-manager "Open with..." flows. Supported MIME type: ''application/x-pfs''. Desktop integration uses ''modman-open.desktop'' with ''Exec=modman-open %f''.
+
+Supported scope: show one local ''.pfs'', load it through ''modman -S <path>'' and unload it through ''modman -R <name>''. It does not support catalog search, updates, tabs, package extraction or batch open.
+
+===== modman-tui =====
+
+''modman-tui'' is a terminal frontend built on ''dialog''.
+
+<code bash>
+modman-tui
+</code>
+
+Environment variables for tests and runtime overrides: ''MODMAN_BIN'', ''DIALOG_BIN'', ''MODMAN_TUI_TMPDIR''.
+
+====== Update management ======
+
+<code bash>
+modman -Sy
 modman --machine --check-updates
-</code>
-
-Машинный контракт TSV (11 полей на строку обновления):
-
-<code>
-update	id	name	old_version	new_version	installed_path	candidate_filename	repo	risk	reboot_required	message
-</code>
-
-^ Поле ^ Значение ^
-| ''update'' | Тип строки (литерал) |
-| ''id'' | Уникальный идентификатор обновления |
-| ''name'' | Короткое имя модуля (identity) |
-| ''old_version'' | Текущая установленная версия |
-| ''new_version'' | Версия кандидата в репозитории |
-| ''installed_path'' | Полный путь к установленному файлу |
-| ''candidate_filename'' | Имя файла кандидата в репозитории |
-| ''repo'' | URL репозитория-источника |
-| ''risk'' | ''normal'' / ''loaded'' / ''system'' |
-| ''reboot_required'' | ''0'' или ''1'' |
-| ''message'' | Пусто или ''blacklisted'' |
-
-Поле **risk**:
-
-  * **normal** — модуль не загружен в текущей сессии.
-  * **loaded** — модуль загружен после старта системы (hot-attached). Обновление безопасно, но вступит в силу после перезагрузки.
-  * **system** — модуль загружен initrd до старта системы. Требует ''--confirm-system-updates''.
-
-===== Применение обновления =====
-
-Применить одно обновление по id из ''--check-updates'':
-
-<code>
 sudo modman --update <id>
-</code>
-
-Применить все доступные обновления:
-
-<code>
 sudo modman --update-all
-</code>
-
-Применить все, включая системные модули:
-
-<code>
 sudo modman --update-all --confirm-system-updates
-</code>
-
-===== Машинный вывод команд обновления =====
-
-<code>
-# Доступное обновление (11 полей):
-update	id	name	old_version	new_version	installed_path	candidate_filename	repo	risk	reboot_required	message
-
-# Успешно применено (8 полей):
-applied	id	old_path	new_path	backup_path	risk	reboot_required	message
-
-# Пропущено (4 поля, только с --verbose-skips или для system без --confirm-system-updates):
-skipped	reason	id	message
-
-# Ошибка (4 поля):
-error	reason	id	message
-</code>
-
-===== Перезагрузка =====
-
-Если поле ''reboot_required=1'', modman добавляет в machine output строку:
-
-<code>
-нужна перезагрузка
-</code>
-
-:!: Эта строка является частью машинного контракта и появляется дословно в machine output, GUI и ''update.log''. Парсеры должны сопоставлять её как литерал.
-
-Перезагрузка **не выполняется автоматически**. Пользователь должен перезагрузить систему самостоятельно.
-
-===== Коды выхода (команды обновления) =====
-
-^ Код ^ Значение ^
-| ''0'' | Успех |
-| ''1'' | Ошибка применения обновления (скачивание, mv, переименование) |
-| ''7'' | Невалидный аргумент (имя модуля, id) |
-| ''8'' | Системный модуль (risk=system) без ''--confirm-system-updates'' |
-
-===== Чёрный список обновлений =====
-
-<code>
-# Просмотр чёрного списка:
-modman --update-blacklist-list
-
-# Добавить версию в чёрный список:
-modman --update-blacklist-add foo-1.1.pfs
-modman --update-blacklist-add foo
-
-# Удалить запись из чёрного списка:
-modman --update-blacklist-remove foo 1.1
-
-# Показать обновления, включая заблокированные:
+modman --update-blacklist-add evince-3.26.0.pfs
 modman --machine --check-updates --include-blacklisted
 </code>
 
-Формат файла чёрного списка (TSV):
+''modman-update-check'' is an XDG autostart helper. It runs ''modman --machine --check-updates'' at login and sends a ''notify-send'' notification only. It never applies updates.
 
-<code>
-identity	version
-evince	3.26.0
-openssh	2601
-</code>
+====== Configuration ======
 
-====== Безопасное обновление: рекомендуемый порядок ======
+Configuration is read in increasing priority:
 
-  - Синхронизировать кэш: ''modman -Sy''
-  - Проверить доступные обновления: ''modman --machine --check-updates''
-  - Проверить поле ''risk'' и ''reboot_required'' для каждого обновления.
-  - Применить безопасные обновления: ''sudo modman --update <id>''
-  - Для системных модулей (risk=system): убедиться в необходимости, затем ''sudo modman --update <id> --confirm-system-updates''
-  - Если ''reboot_required=1'' — перезагрузить систему после применения.
+  - ''/usr/share/modman/modman.conf'' — shipped defaults.
+  - ''/etc/modman.conf'' — system-wide configuration.
+  - ''~/.config/modman/modman.conf'' or ''$XDG_CONFIG_HOME/modman/modman.conf'' — per-user override.
 
-:!: Системные модули (risk=system) загружены initrd и могут потребовать перезагрузки. Всегда проверяйте ''reboot_required'' перед применением.
+Key variables:
 
-====== Автопроверка обновлений при входе ======
+^ Variable ^ Purpose ^
+| ''DOWNLOAD_DIR'' | Where modules are downloaded. Auto-detected on rootaufs2 when possible. |
+| ''AUFS_INITRD_PREFIX'' | Prefix used to classify initrd/base modules. |
+| ''EXT'' | Module extension, default ''pfs''. |
+| ''CLI_STYLE'' | ''pacman'' or ''apt''. |
+| ''CMD_LOAD'' / ''CMD_UNLOAD'' | Runtime load/unload commands. Defaults: ''pfsload'' / ''pfsunload''. |
+| ''REPO_URLS'' | Repository mirror list. |
+| ''MODMAN_STATE_DIR'' | Persistent state directory, default ''/var/lib/modman''. |
+| ''UPDATE_CHECK_ON_LOGIN'' | ''1'' or ''0'' for login-time update checking. |
 
-**modman-update-check** — вспомогательный скрипт, запускаемый автоматически при входе в систему через XDG autostart (''/etc/xdg/autostart/modman-update-check.desktop'').
+See ''modman.conf(5)'' for the full reference.
 
-  * Использует ''modman --machine --check-updates'' — **не применяет обновления**.
-  * При обнаружении обновлений отправляет уведомление через ''notify-send''.
-  * Если ''UPDATE_CHECK_OPEN_GUI=1'' — дополнительно открывает ''modman-gui --updates''.
-  * Управляется ключом ''UPDATE_CHECK_ON_LOGIN'' в ''modman.conf''.
+====== Boot stacks and AUFS / OverlayFS behavior ======
 
-<code>
-# Отключить автопроверку:
-UPDATE_CHECK_ON_LOGIN=0
+modman delegates boot-stack and layering detection to pfs-utils plugin detectors:
 
-# Включить открытие GUI при обнаружении обновлений:
-UPDATE_CHECK_OPEN_GUI=1
-</code>
-
-====== Графический интерфейс (GUI) ======
-
-**modman-gui** — GTK3 C-обёртка над ''modman'' CLI. Все операции асинхронны с возможностью отмены.
-
-==== Вкладки ====
-
-  * **Подключенные** (''modman --list-loaded-after'') — hot-attached модули, добавленные после старта. Безопасно отключать.
-  * **Инет** (''modman -Ss <query>'') — поиск в репозитории с наложением локальных ''.pfs''.
-  * **Локальные** (''modman --list-local'') — скачанные ''.pfs'', ещё не подключённые.
-  * **Система** (''modman --list-loaded-before'') — базовые модули, загруженные initrd. Отключение изменяет работающую систему.
-  * **Обновления** (''modman --machine --check-updates'') — доступные обновления с полями risk и reboot_required.
-
-==== Режимы загрузки ====
-
-Выбираются через контекстное меню (правая кнопка мыши):
-
-  * **--upper** — верхний слой AUFS (по умолчанию).
-  * **--lower** — нижний слой AUFS.
-  * **--toram** — копирование в tmpfs перед монтированием.
-  * Комбинации: **--lower --toram**, **--upper --toram**.
-
-Команды для пунктов меню задаются ключами ''PFSLOAD_ALLOW_*'' в ''modman.conf''.
-
-==== Особенности ====
-
-  * Polkit-интеграция для root-операций без CLI.
-  * Debounce поиска — задержка перед вызовом бэкенда.
-  * Отмена операций при переключении вкладок.
-  * ''GtkInfoBar'' для статусов и предупреждений о перезагрузке.
-  * Без custom CSS — опирается на системные темы.
-
-====== Разрешение зависимостей ======
-
-Каждый ''.pfs''-модуль содержит ''start.sh'' с зависимостями в формате:
-
-<code>
-<pkg>-dep <dep1> <dep2> <dep3>
-</code>
-
-Мейнтейнер генерирует ''000-dependencies.txt'' командой ''modman -di DIR''. Клиент скачивает его через ''modman -Sy''.
-
-При установке (''modman -S'') зависимости разрешаются рекурсивно через подпроцессы. Нормализация имени (''short_pkgname'') обрезает версию, архитектуру и теги ревизии:
-
-<code>
-evince-gtk3-p-3.26.0_64-sf06.pfs  →  evince-gtk3-p
-030-gtk3-2601-sf03.pfs             →  030-gtk3
-</code>
-
-Для пропуска встроенных зависимостей используйте ''MODMAN_IGNORE_DEPS'':
-
-<code>
-MODMAN_IGNORE_DEPS="030-gtk3"
-</code>
-
-====== Определение initrd ======
-
-modman делегирует определение initrd в pfs-utils через plugin-детекторы:
-
-^ Файл ^ initrd ^ Слойность ^ AUFS prefix ^
+^ Detector ^ initrd ^ Layering ^ AUFS prefix ^
 | ''10-uird.sh'' | uird | overlay | ''${SYSMNT}/bundles'' |
 | ''20-rootaufs2.sh'' | rootaufs2 | aufs | ''/run/archroot/live/memory/images'' |
 | ''30-porteus.sh'' | porteus | aufs | ''${SYSMNT}/bundles'' |
 | ''40-livekit.sh'' | livekit | overlay | ''${SYSMNT}/bundles'' |
 
-Добавление нового типа initrd — drop-in: поместите ''50-yourname.sh'' в ''/usr/local/lib/pfs-utils/initrd-detectors/''.
+AUFS can append a layer to a live root, so ''pfsload'' / ''pfsunload'' can hot-attach modules system-wide. OverlayFS cannot add a ''lowerdir'' to an active mount. On overlay-root systems, system-wide hot-load is unavailable; use ''pfsrun'' for private namespace execution instead.
 
-====== Машинный контракт (--machine TSV) ======
+Full survey: [[https://github.com/sfs-pra/pfs-utils-05/wiki/aufs-alternatives|AUFS alternatives in the pfs-utils wiki]] ([[https://github.com/sfs-pra/pfs-utils-05/wiki/aufs-alternatives-ru|Русский]]).
 
-Флаг ''--machine'' переключает весь вывод в TSV-формат, пригодный для парсинга. Подавляет цветной вывод ''print_msg'', но сохраняет ''print_err'' / ''fatal_err'' в stderr.
+====== Installation ======
 
-===== Листинг загруженных модулей =====
+<code bash>
+# Release build from the working tree
+makepkg -si
 
-<code>
-modman --machine --list-loaded
+# Build straight from git
+makepkg -p PKGBUILD.git -si
 </code>
 
-6 полей на строку:
+This produces and installs ''modman'', ''modman-gui'' and ''modman-tui'' packages.
 
-<code>
-name	layer	path	version	mount_mode	mount_in_ram
-</code>
-
-===== Поиск =====
-
-<code>
-modman --machine -Ss evince
-</code>
-
-===== Обновления =====
-
-<code>
-modman --machine --check-updates
-modman --machine --update-all --verbose-skips
-</code>
-
-===== Удаление локальных файлов =====
-
-<code>
-modman --machine --remove-local evince
-</code>
-
-====== Примеры использования ======
-
-===== Базовый workflow =====
-
-<code>
-# Синхронизировать кэш
-modman -Sy
-
-# Найти модуль
-modman -Ss evince
-
-# Установить
-sudo modman -S evince
-
-# Проверить загруженные
-modman --machine --list-loaded-after
-
-# Отключить
-sudo modman -R evince
-
-# Удалить локальный файл
-modman -Rl evince
-</code>
-
-===== Workflow обновлений =====
-
-<code>
-# Синхронизировать кэш
-modman -Sy
-
-# Проверить обновления (machine-режим для парсинга)
-modman --machine --check-updates
-
-# Применить одно обновление
-sudo modman --update abc123
-
-# Применить все (пропустить системные)
-sudo modman --update-all
-
-# Применить все, включая системные
-sudo modman --update-all --confirm-system-updates
-
-# Заблокировать версию
-modman --update-blacklist-add evince-3.26.0.pfs
-</code>
-
-===== Машиночитаемый листинг для downstream-парсеров =====
-
-<code>
-modman --machine --list-loaded-before
-modman --machine --list-loaded-after
-modman --machine --check-updates | awk -F'\t' '$1=="update" {print $3, $4, "->", $5}'
-</code>
-
-===== Установка с нестандартными параметрами =====
-
-<code>
-# Установить в нижний слой
-sudo modman --lower -S evince
-
-# Установить в RAM
-sudo modman --toram -S evince
-
-# Установить в нижний слой + RAM
-sudo modman --lower --toram -S evince
-
-# Переопределить каталог загрузки
-sudo modman -d /tmp/modman-cache -S evince
-</code>
-
-====== Зависимости ======
+====== Dependencies ======
 
   * //bash//
-  * //gtk3//, //glib2// (для GUI)
   * //pfs-utils-cli >= 2026.04// (''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfs'', ''pfsbench'')
-  * //polkit// (для root-операций через GUI)
-  * //wget// (для загрузки модулей и кэша)
-  * //squashfs-tools// (для работы с ''.pfs'')
-  * //erofs-utils// (опционально, для erofs-модулей)
-  * //libnotify// (для ''notify-send'' в ''modman-update-check'')
+  * //gtk3//, //glib2// (GUI only)
+  * //polkit// (root operations from GUI)
+  * //dialog// (TUI only)
+  * //gettext// (TUI and localization)
+  * //wget// (module and cache downloads)
+  * //squashfs-tools// (''.pfs'' handling)
+  * //erofs-utils// (optional, erofs modules)
+  * //libnotify// (''notify-send'' for login update check)
 
-====== Короткие псевдонимы ======
+====== Short aliases ======
 
-^ Длинная форма ^ Псевдоним ^ Мнемоника ^
+^ Long form ^ Alias ^ Mnemonic ^
 | ''--list-loaded'' | ''-L'' | List loaded |
-| ''--list-loaded-before'' | ''-Lb'' | List loaded — before |
-| ''--list-loaded-after'' | ''-La'' | List loaded — after |
+| ''--list-loaded-before'' | ''-Lb'' | List loaded before initrd/user split |
+| ''--list-loaded-after'' | ''-La'' | List loaded after boot |
 | ''--list-local'' | ''-Ql'' | Query local |
 | ''--remove-local'' | ''-Rl'' | Remove local |
 
-====== Глобальные флаги ======
+====== Global flags ======
 
-^ Флаг ^ Описание ^
-| ''--machine'' | TSV-вывод для парсинга |
-| ''--confirm-system-updates'' | Разрешить обновление системных модулей |
-| ''--verbose-skips'' | Выводить строки ''skipped'' |
-| ''--include-blacklisted'' | Включать заблокированные версии в ''--check-updates'' |
-| ''-d DIR'' / ''--download-dir DIR'' | Переопределить DOWNLOAD_DIR |
-| ''--progress-file PATH'' | Файл для прогресса загрузки (используется GUI) |
-| ''--lower'' | Установить в нижний слой AUFS |
-| ''--upper'' | Установить в верхний слой AUFS |
-| ''--toram'' | Скопировать в tmpfs перед монтированием |
-| ''--load-cmd CMD'' | Переопределить команду загрузки |
+^ Flag ^ Description ^
+| ''--machine'' | TSV output for parsers. |
+| ''--confirm-system-updates'' | Allow updating system/base modules. |
+| ''--verbose-skips'' | Emit ''skipped'' lines. |
+| ''--include-blacklisted'' | Include blacklisted versions in ''--check-updates''. |
+| ''-d DIR'' / ''--download-dir DIR'' | Override ''DOWNLOAD_DIR''. |
+| ''--progress-file PATH'' | Progress file used by GUI. |
+| ''--lower'' | Attach to lower AUFS layer. |
+| ''--upper'' | Attach to upper AUFS layer. |
+| ''--toram'' | Copy to tmpfs before mounting. |
+| ''--load-cmd CMD'' | Override load command. |
 
 ====== See also ======
 
-  * ''modman(8)'' — полная справка по CLI
-  * ''modman.conf(5)'' — справка по конфигурации
-  * ''pfs-utils(8)'' — документация pfs-utils v5
-  * ''pfsload(8)'', ''pfsunload(8)'', ''pfsinfo(8)'', ''pfsbench(8)''
-  * [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils wiki]] — документация pfs-utils
-  * [[http://forum.puppyrus.org/index.php?board=176.0|Обсуждение на форуме]]
-  * ADR: ''docs/adr/0001-layering-dispatch.md'', ''docs/adr/0002-v4-backward-compat.md''
+  * ''modman(8)'' — full CLI reference.
+  * ''modman.conf(5)'' — configuration reference.
+  * ''modman-open(1)'', ''modman-tui(8)''.
+  * ''pfs-utils(8)'', ''pfsload(8)'', ''pfsunload(8)'', ''pfsinfo(8)'', ''pfsbench(8)''.
+  * [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils wiki]].
+  * [[http://forum.puppyrus.org/index.php?board=176.0|Forum discussion]].

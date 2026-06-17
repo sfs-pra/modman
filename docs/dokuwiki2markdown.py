@@ -22,7 +22,6 @@ from collections.abc import Sequence
 from typing import cast
 
 SMILEYS = [':!:', ':-D', ':-)', ';-)', ':?:', ':-(', '8-)']
-HEADING_RE = re.compile(r'^(#{1,6})\s+(.+?)\s*$')
 
 
 def convert_inline(text: str) -> str:
@@ -88,54 +87,6 @@ def flush_quote(buf: list[str], out: list[str]) -> None:
     buf.clear()
 
 
-def heading_label(text: str) -> str:
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-    text = re.sub(r'[`*_~]', '', text)
-    return text.strip()
-
-
-def heading_anchor(text: str) -> str:
-    label = heading_label(text).lower()
-    label = re.sub(r'[^\w\s-]', '', label, flags=re.UNICODE)
-    label = re.sub(r'[\s-]+', '-', label).strip('-')
-    return label
-
-
-def add_table_of_contents(lines: list[str]) -> list[str]:
-    headings: list[tuple[int, str, str]] = []
-    seen: dict[str, int] = {}
-    first_heading_index: int | None = None
-
-    for i, line in enumerate(lines):
-        m = HEADING_RE.match(line)
-        if not m:
-            continue
-        if first_heading_index is None:
-            first_heading_index = i
-            continue
-        level = len(m.group(1))
-        label = heading_label(m.group(2))
-        anchor = heading_anchor(m.group(2))
-        count = seen.get(anchor, 0)
-        seen[anchor] = count + 1
-        if count:
-            anchor = '%s-%d' % (anchor, count)
-        headings.append((level, label, anchor))
-
-    if first_heading_index is None or not headings:
-        return lines
-
-    title = 'Содержание' if re.search(r'[А-Яа-яЁё]', lines[first_heading_index]) else 'Contents'
-    toc = ['## %s' % title, '']
-    baseline_levels = [level for level, _, _ in headings if level > 1]
-    min_level = min(baseline_levels or [level for level, _, _ in headings])
-    for level, label, anchor in headings:
-        indent = '  ' * max(0, level - min_level)
-        toc.append('%s- [%s](#%s)' % (indent, label, anchor))
-    toc.append('')
-    return lines[:first_heading_index + 1] + [''] + toc + lines[first_heading_index + 1:]
-
-
 def convert_line(line: str) -> str:
     m = re.match(r'^(={2,6})\s*(.*?)\s*\1\s*$', line)
     if m:
@@ -192,7 +143,6 @@ def convert(text: str) -> str:
         out.append(convert_line(raw))
     flush_table(table_buf, out)
     flush_quote(quote_buf, out)
-    out = add_table_of_contents(out)
     result = '\n'.join(out)
     result = re.sub(r'\n{3,}', '\n\n', result)
     return result.rstrip() + '\n'

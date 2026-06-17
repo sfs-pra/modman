@@ -10,7 +10,6 @@
 #   2. Create the first wiki page in the web UI (any content). The wiki git
 #      repo (<repo>.wiki.git) does NOT exist until the first page is saved.
 #
-# modman.dokuwiki becomes the wiki landing page (Home).
 name: Publish docs to Wiki
 
 on:
@@ -52,12 +51,12 @@ jobs:
           shopt -s nullglob
           for f in _wiki/*.md; do
             base="$(basename "$f" .md)"
-            # modman is the project landing page; others keep their slug.
-            if [ "$base" = "modman" ]; then
-              dest="Home"
-            else
-              dest="$base"
-            fi
+            case "$base" in
+              modman)    dest="Home" ;;
+              modman.ru) dest="Home-ru" ;;
+              *.ru)      dest="${base%.ru}-ru" ;;
+              *)         dest="$base" ;;
+            esac
             find wiki -maxdepth 1 -type f -name "${dest}.*" ! -name "${dest}.md" -delete
             cp "$f" "wiki/${dest}.md"
             echo "synced $f -> ${dest}.md"
