@@ -9,7 +9,7 @@
   * Runtime filesystem work is delegated to [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils]] v5: ''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfsbench'' and related tools.
   * Supported boot stacks are detected through pfs-utils: **rootaufs2**, **UIRD**, **Porteus**, and **livekit**.
   * The ''--machine'' TSV contract is stable for GUI, TUI and scripts. Fields are tab-separated and locale-independent.
-  * [[http://forum.puppyrus.org/index.php?board=176.0|Discussion]]
+  * [[https://forum.puppyrus.org/index.php?board=213.0|Discussion]]
   * [[https://github.com/sfs-pra/modman|Download / sources]]
 
 ====== Architecture overview ======
@@ -249,4 +249,4 @@ This produces and installs ''modman'', ''modman-gui'' and ''modman-tui'' package
   * ''modman-open(1)'', ''modman-tui(8)''.
   * ''pfs-utils(8)'', ''pfsload(8)'', ''pfsunload(8)'', ''pfsinfo(8)'', ''pfsbench(8)''.
   * [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils wiki]].
-  * [[http://forum.puppyrus.org/index.php?board=176.0|Forum discussion]].
+  * [[https://forum.puppyrus.org/index.php?board=213.0|Forum discussion]].

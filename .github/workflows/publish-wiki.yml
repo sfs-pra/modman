@@ -49,6 +49,10 @@ jobs:
       - name: Sync generated pages into the wiki
         run: |
           shopt -s nullglob
+          obsolete_pages=(pfs-utils pfs-utils-ru pfs-utils.ru aufs-alternatives aufs-alternatives-ru aufs-alternatives.ru)
+          for page in "${obsolete_pages[@]}"; do
+            find wiki -maxdepth 1 -type f -name "${page}.*" -delete
+          done
           for f in _wiki/*.md; do
             base="$(basename "$f" .md)"
             case "$base" in

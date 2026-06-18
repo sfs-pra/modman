@@ -9,7 +9,7 @@
   * Работает поверх [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils]] v5: все файловые операции делегируются ''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfsbench''.
   * Поддерживает initrd-стеки: **rootaufs2**, **UIRD**, **Porteus**, **livekit** — через plugin-детекторы pfs-utils.
   * Машинный контракт (''--machine'' TSV) стабилен для GUI и скриптов: поля разделяются табами и не зависят от локали.
-  * [[http://forum.puppyrus.org/index.php?board=176.0|Обсуждение]]
+  * [[https://forum.puppyrus.org/index.php?board=213.0|Обсуждение]]
   * [[https://github.com/sfs-pra/modman|Скачать / исходники]]
 
 ====== Обзор архитектуры ======
@@ -558,5 +558,5 @@ sudo modman -d /tmp/modman-cache -S evince
   * ''pfs-utils(8)'' — документация pfs-utils v5
   * ''pfsload(8)'', ''pfsunload(8)'', ''pfsinfo(8)'', ''pfsbench(8)''
   * [[https://github.com/sfs-pra/pfs-utils-05/wiki|pfs-utils wiki]] — документация pfs-utils
-  * [[http://forum.puppyrus.org/index.php?board=176.0|Обсуждение на форуме]]
+  * [[https://forum.puppyrus.org/index.php?board=213.0|Обсуждение на форуме]]
   * ADR: ''docs/adr/0001-layering-dispatch.md'', ''docs/adr/0002-v4-backward-compat.md''
