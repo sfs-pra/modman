@@ -521,7 +521,7 @@ sudo modman -d /tmp/modman-cache -S evince
 
   * //bash//
   * //gtk3//, //glib2// (для GUI)
-  * //pfs-utils-cli >= 2026.04// (''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfs'', ''pfsbench'')
+  * //pfs-utils5 >= 2026.04// (''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfs'', ''pfsbench'')
   * //polkit// (для root-операций через GUI)
   * //wget// (для загрузки модулей и кэша)
   * //squashfs-tools// (для работы с ''.pfs'')

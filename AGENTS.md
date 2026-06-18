@@ -67,7 +67,7 @@ Two co-located products for hot-attaching/detaching `.pfs` squashfs modules to a
 └── pfs-utils/        # READ-ONLY UPSTREAM REFERENCE — do not edit
     ├── usr/local/bin/              # 25 sh/bash scripts (pfsload, pfsunload, pfsinfo, pfs, mkpfs, …)
     ├── usr/share/man/{man8,ru/man8}/pfs-utils.8  # authoritative man pages (EN + RU)
-    └── .PKGINFO                    # pkgname=pfs-utils-cli, pkgver=2026.03-07
+    └── .PKGINFO                    # pkgname=pfs-utils5, pkgver=2026.03-07
 ```
 
 `.ocp/` is agent state — ignore for product work. `pfs-utils/` is the upstream package snapshot (<https://github.com/pfs-utils/pfs-utils-cli/>) included here for reference; modman/sfs-get invoke its binaries at runtime but do NOT ship them.

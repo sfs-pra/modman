@@ -79,7 +79,7 @@ flowchart TD
 Нижний слой. Владеет всем, что касается файловой системы и ядра: AUFS /
 OverlayFS mount и unmount, детект формата squashfs / erofs, детект initrd и
 режима слоёв, сборка и разборка модулей. Поставляется отдельным пакетом
-`pfs-utils-cli`
+`pfs-utils5`
 ([sfs-pra/pfs-utils-05](https://github.com/sfs-pra/pfs-utils-05)). Ключевые
 утилиты: `pfsload`, `pfsunload`, `pfsinfo`, `pfs`, `pfsbench`.
 
@@ -115,7 +115,7 @@ OverlayFS mount и unmount, детект формата squashfs / erofs, дет
 
 | Пакет | Бинарник | Роль | Зависит от |
 | --- | --- | --- | --- |
-| `modman` | `modman` | CLI-бэкенд + контракт `--machine` | `bash`, `pfs-utils-cli>=2026.04` |
+| `modman` | `modman` | CLI-бэкенд + контракт `--machine` | `bash`, `pfs-utils5>=2026.04` |
 | `modman-gui` | `modman-gui`, `modman-open` | GTK3-менеджер + opener | `modman`, `gtk3`, `glib2` |
 | `modman-tui` | `modman-tui` | терминальный frontend (`dialog`) | `modman`, `dialog`, `gettext` |
 
@@ -335,7 +335,7 @@ modman --update-blacklist-add evince-3.26.0.pfs     # заблокировать
 ## Зависимости
 
 - `bash`
-- `pfs-utils-cli >= 2026.04` (`pfsload`, `pfsunload`, `pfsinfo`, `pfs`, `pfsbench`)
+- `pfs-utils5 >= 2026.04` (`pfsload`, `pfsunload`, `pfsinfo`, `pfs`, `pfsbench`)
 - `gtk3`, `glib2` — только для GUI
 - `polkit` — root-операции из GUI
 - `dialog` — только для TUI

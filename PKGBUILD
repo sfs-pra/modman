@@ -126,11 +126,11 @@ check() {
 
 package_modman() {
     pkgdesc="CLI module manager backend for any frugal / live-CD Linux"
-    depends=('bash' 'pfs-utils-cli>=2026.04')
+    depends=('bash' 'pfs-utils5>=2026.04')
     optdepends=('erofs-utils: erofs format support'
                 'modman-gui: optional GTK3 graphical frontend'
                 'modman-tui: optional dialog terminal frontend')
-    conflicts=('pfs-utils-cli<2026.04')
+    conflicts=('pfs-utils' 'pfs-utils-cli<2026.04')
     provides=('modman')
     backup=('etc/modman.conf')
 

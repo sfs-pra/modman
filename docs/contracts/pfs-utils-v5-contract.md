@@ -715,9 +715,10 @@ pfsinfo        -> v5 (adds --machine; v4 behavior preserved)
 
 **PKGBUILD constraints**:
 ```
-conflicts=('pfs-utils-cli<2026.04')
-provides=('pfs-utils-cli')
-pkgver=2026.04-01
+pkgname=pfs-utils5
+pkgver=2026.04
+conflicts=('pfs-utils' 'pfs-utils-cli')
+provides=("pfs-utils=$pkgver" "pfs-utils-cli=$pkgver")
 ```
 
 **Rollback procedure**:

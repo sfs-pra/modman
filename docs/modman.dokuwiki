@@ -26,7 +26,7 @@ Frontends do not access filesystem layers directly. GUI, TUI and file opener all
 ====== Components ======
 
 ^ Package ^ Binary ^ Role ^ Depends on ^
-| ''modman'' | ''modman'' | CLI backend and ''--machine'' contract | ''bash'', ''pfs-utils-cli >= 2026.04'' |
+| ''modman'' | ''modman'' | CLI backend and ''--machine'' contract | ''bash'', ''pfs-utils5 >= 2026.04'' |
 | ''modman-gui'' | ''modman-gui'', ''modman-open'' | GTK3 manager and file opener | ''modman'', ''gtk3'', ''glib2'', ''polkit'' |
 | ''modman-tui'' | ''modman-tui'' | dialog terminal frontend | ''modman'', ''dialog'', ''gettext'' |
 
@@ -209,7 +209,7 @@ This produces and installs ''modman'', ''modman-gui'' and ''modman-tui'' package
 ====== Dependencies ======
 
   * //bash//
-  * //pfs-utils-cli >= 2026.04// (''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfs'', ''pfsbench'')
+  * //pfs-utils5 >= 2026.04// (''pfsload'', ''pfsunload'', ''pfsinfo'', ''pfs'', ''pfsbench'')
   * //gtk3//, //glib2// (GUI only)
   * //polkit// (root operations from GUI)
   * //dialog// (TUI only)

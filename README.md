@@ -79,7 +79,7 @@ flowchart TD
 The lowest layer. It owns everything that touches the filesystem and the
 kernel: AUFS / OverlayFS mount and unmount, squashfs / erofs format detection,
 initrd / layering-mode detection, module build and extraction. Shipped
-separately as the `pfs-utils-cli` package
+separately as the `pfs-utils5` package
 ([sfs-pra/pfs-utils-05](https://github.com/sfs-pra/pfs-utils-05)). Key tools:
 `pfsload`, `pfsunload`, `pfsinfo`, `pfs`, `pfsbench`.
 
@@ -113,7 +113,7 @@ output. This keeps presentation and runtime fully decoupled.
 
 | Package | Binary | Role | Depends on |
 | --- | --- | --- | --- |
-| `modman` | `modman` | CLI backend + `--machine` contract | `bash`, `pfs-utils-cli>=2026.04` |
+| `modman` | `modman` | CLI backend + `--machine` contract | `bash`, `pfs-utils5>=2026.04` |
 | `modman-gui` | `modman-gui`, `modman-open` | GTK3 manager + file opener | `modman`, `gtk3`, `glib2` |
 | `modman-tui` | `modman-tui` | `dialog` terminal frontend | `modman`, `dialog`, `gettext` |
 
@@ -332,7 +332,7 @@ See [`modman.conf(5)`](docs/modman.conf.5) for the full reference.
 ## Dependencies
 
 - `bash`
-- `pfs-utils-cli >= 2026.04` (`pfsload`, `pfsunload`, `pfsinfo`, `pfs`, `pfsbench`)
+- `pfs-utils5 >= 2026.04` (`pfsload`, `pfsunload`, `pfsinfo`, `pfs`, `pfsbench`)
 - `gtk3`, `glib2` — GUI only
 - `polkit` — root operations from the GUI
 - `dialog` — TUI only
